@@ -1,15 +1,25 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
+const LOCK_STALE_MS = 30_000;
+const LOCK_RETRY_MS = 25;
+const LOCK_TIMEOUT_MS = 10_000;
+
 /**
- * A tiny JSON-file store with atomic writes.
+ * A tiny JSON-file store with atomic writes, safe for more than one process.
  *
  * Deliberately not SQLite. This holds a personal queue and a handful of OAuth
- * grants: tens of rows, one writer. A file that can be read with `cat` and fixed
- * with an editor is worth more here than indexes nobody needs.
+ * grants: tens of rows. A file that can be read with `cat` and fixed with an
+ * editor is worth more here than indexes nobody needs.
+ *
+ * It does have to tolerate concurrent writers, though, and that is not
+ * theoretical: the bridge writes to the queue when a client sends
+ * `scheduled_at`, the runner writes when it publishes, and you will run
+ * `desk queue add` from a shell while both are up. So there is no in-memory
+ * cache (a second process's writes would be invisible behind one) and every
+ * read-modify-write happens under a lock file.
  */
 export class JsonStore<T> {
-  private cache: T | null = null;
   private writing: Promise<void> = Promise.resolve();
 
   constructor(
@@ -21,35 +31,85 @@ export class JsonStore<T> {
     return new JsonStore<T>(join(dataDir, filename), initial);
   }
 
+  /** Always from disk. Another process may have written since the last call. */
   async read(): Promise<T> {
-    if (this.cache !== null) return this.cache;
     try {
-      const raw = await readFile(this.path, 'utf8');
-      this.cache = JSON.parse(raw) as T;
+      return JSON.parse(await readFile(this.path, 'utf8')) as T;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      this.cache = this.initial();
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return this.initial();
+      throw error;
     }
-    return this.cache;
   }
 
   /**
-   * Serialises mutations so two concurrent updates cannot lose one another, and
-   * writes via a temporary file so an interrupted write cannot truncate state.
+   * Serialises mutations within this process, takes a lock file against the
+   * others, and writes via a temporary file so an interrupted write cannot
+   * truncate the state.
    */
   async update<R>(mutate: (state: T) => R | Promise<R>): Promise<R> {
     let result!: R;
+
     const next = this.writing.then(async () => {
-      const state = await this.read();
-      result = await mutate(state);
       await mkdir(dirname(this.path), { recursive: true });
-      const temporary = `${this.path}.${process.pid}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-      await rename(temporary, this.path);
-      this.cache = state;
+      await this.lock();
+      try {
+        const state = await this.read();
+        result = await mutate(state);
+        const temporary = `${this.path}.${process.pid}.tmp`;
+        await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+        await rename(temporary, this.path);
+      } finally {
+        await this.unlock();
+      }
     });
+
     this.writing = next.catch(() => undefined);
     await next;
     return result;
+  }
+
+  private get lockPath(): string {
+    return `${this.path}.lock`;
+  }
+
+  private async lock(): Promise<void> {
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+    for (;;) {
+      try {
+        // "wx" fails if the file exists, which is what makes this a lock.
+        const handle = await open(this.lockPath, 'wx');
+        await handle.writeFile(String(process.pid));
+        await handle.close();
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+
+        // A process killed mid-write leaves its lock behind. Break it once it is
+        // older than any honest write could be.
+        try {
+          const info = await stat(this.lockPath);
+          if (Date.now() - info.mtimeMs > LOCK_STALE_MS) {
+            await rm(this.lockPath, { force: true });
+            continue;
+          }
+        } catch {
+          continue;
+        }
+
+        if (Date.now() > deadline) {
+          throw new Error(
+            `Timed out waiting for ${this.lockPath}. If no other process is running, delete it.`,
+          );
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+      }
+    }
+  }
+
+  private async unlock(): Promise<void> {
+    await rm(this.lockPath, { force: true });
   }
 }

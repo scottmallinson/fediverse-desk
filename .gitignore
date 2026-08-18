@@ -8,3 +8,6 @@ dist/
 !.env.example
 data/
 *.sqlite
+
+# Container Manager environment file, holds the staff token
+stack.env

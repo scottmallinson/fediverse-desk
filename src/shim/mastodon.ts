@@ -353,3 +353,76 @@ export function toNodeInfo(options: {
         },
     };
 }
+
+/**
+ * Webfinger for the bridge's domain, answered by pointing at the real thing.
+ *
+ * A client that resolves acct:scott@desk.example.com should not discover an
+ * actor here, because there is no actor here: the bridge has no inbox and no
+ * signing key. It discovers the Ghost actor instead, which is the identity that
+ * actually federates. A remote server following that link lands on
+ * scottmallinson.com and its canonical handle, which is the correct outcome and
+ * the reason this is safe to serve.
+ */
+export function toWebfinger(account: Account, resource: string): Record<string, unknown> {
+    const links: Array<Record<string, string>> = [
+        {
+            rel: 'self',
+            type: 'application/activity+json',
+            href: account.apId,
+        },
+    ];
+
+    if (account.url) {
+        links.push({
+            rel: 'http://webfinger.net/rel/profile-page',
+            type: 'text/html',
+            href: account.url,
+        });
+    }
+
+    if (account.avatarUrl) {
+        links.push({ rel: 'http://webfinger.net/rel/avatar', href: account.avatarUrl });
+    }
+
+    return {
+        subject: resource,
+        aliases: [account.apId, account.url].filter((value): value is string => Boolean(value)),
+        links,
+    };
+}
+
+export interface ParsedResource {
+    username: string;
+    host: string;
+}
+
+/**
+ * Accepts the forms that turn up in the wild: "acct:user@host", a bare
+ * "user@host", and the https URL some implementations send instead.
+ */
+export function parseWebfingerResource(resource: string): ParsedResource | null {
+    const value = resource.trim();
+    if (!value) return null;
+
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+        try {
+            const url = new URL(value);
+            const last = url.pathname.split('/').filter(Boolean).pop();
+            if (!last) return null;
+            return { username: last.replace(/^@/, ''), host: url.host.toLowerCase() };
+        } catch {
+            return null;
+        }
+    }
+
+    const withoutScheme = value.startsWith('acct:') ? value.slice(5) : value;
+    const at = withoutScheme.lastIndexOf('@');
+    if (at <= 0) return null;
+
+    const username = withoutScheme.slice(0, at).replace(/^@/, '');
+    const host = withoutScheme.slice(at + 1).toLowerCase();
+    if (!username || !host) return null;
+
+    return { username, host };
+}

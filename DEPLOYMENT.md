@@ -37,7 +37,7 @@ fires, the post is lost, and you will find out late. So pick one:
 
 | Where the bridge runs | What to do |
 |---|---|
-| Somewhere always on (a VPS, a home server, a Pi) | Let Buffer own the schedule. You do not need `desk run` at all |
+| Somewhere always on (a NAS, a VPS, a Pi) | Let Buffer own the schedule. See [Running it on a Synology NAS](#running-it-on-a-synology-nas) |
 | Your laptop | Do **not** let Buffer schedule to it. Queue Fediverse posts with `desk queue add` and leave Buffer to the channels it already handles |
 
 The second row is not a lesser option. The bridge is still worth running on a
@@ -170,7 +170,133 @@ Expect rough edges. These are timeline readers, and status ids here are encoded
 ActivityPub URLs rather than sortable snowflakes, so scrolling back through
 history will misbehave. Composing and replying are the parts that work.
 
-## Keep it running
+## Running it on a Synology NAS
+
+A DS1821+ is x86-64, so the image builds and runs natively with nothing special.
+DSM 7.2's Container Manager is Docker Compose underneath, and reads a
+`docker-compose.yml` as a Project.
+
+### One container, one writer
+
+The compose file runs `shim --with-runner`, so the bridge serves clients and
+drains the queue in the same process. That keeps the deployment to a single
+service.
+
+The store is safe for several processes regardless (it locks, and it re-reads
+before every write, so `desk queue add` from a shell while the container is up
+cannot lose a post). One writer is simply one fewer thing to reason about.
+
+### Get the files onto the NAS
+
+Put the repository in a shared folder, for example `/volume1/docker/fediverse-desk`.
+Over SSH:
+
+```bash
+cd /volume1/docker
+git clone https://github.com/scottmallinson/fediverse-desk.git
+cd fediverse-desk
+cp stack.env.example stack.env
+chmod 600 stack.env
+vi stack.env          # GHOST_URL, the staff token, SHIM_PUBLIC_URL, SHIM_PASSWORD
+```
+
+`stack.env` holds a token that is full admin on your site. It is gitignored, and
+mode 600 is worth setting even so.
+
+### Create the project
+
+In DSM: **Container Manager** -> **Project** -> **Create**, set the path to the
+folder you just made, and it will pick up `docker-compose.yml`. Build and start.
+
+Or from SSH, which gives you the build output when something goes wrong:
+
+```bash
+sudo docker compose up -d --build
+sudo docker compose logs -f
+```
+
+You should see the bridge report the address it is serving, and the queue runner
+report its interval.
+
+### Check it from the NAS itself
+
+```bash
+curl -s http://127.0.0.1:4040/.well-known/nodeinfo
+sudo docker inspect --format '{{.State.Health.Status}}' fediverse-desk
+```
+
+The health check calls `/.well-known/nodeinfo`, which needs neither a token nor a
+reachable Ghost. So "healthy" means the process is serving, and nothing more:
+credentials are checked by `desk status`, not by the probe.
+
+### Run a CLI command against the running container
+
+```bash
+sudo docker exec -it fediverse-desk node dist/cli.js status
+sudo docker exec -it fediverse-desk node dist/cli.js queue list
+sudo docker exec -it fediverse-desk node dist/cli.js queue add "Later." --at +6h
+```
+
+These share the volume with the service, which is exactly the concurrent-writer
+case the store's locking exists for.
+
+### Expose it
+
+The compose file binds to `127.0.0.1:4040` on purpose: the container is reachable
+from the NAS, and not from the LAN or the internet. Put the tunnel on the NAS
+alongside it and point it at that port.
+
+The simplest arrangement is a second container in the same project:
+
+```yaml
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: fediverse-desk-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - desk
+```
+
+Add `CLOUDFLARE_TUNNEL_TOKEN` to `stack.env`, and configure the tunnel's public
+hostname in the Cloudflare dashboard to point at `http://desk:4040`. Inside the
+project the service name resolves, so the bridge never needs a published port at
+all: you can drop the `ports:` block entirely once the tunnel is doing the work.
+
+DSM's own reverse proxy plus Let's Encrypt is a reasonable alternative if you
+would rather open a port on your router. A tunnel avoids that, which is why it is
+the default here.
+
+### Updating
+
+```bash
+cd /volume1/docker/fediverse-desk
+git pull
+sudo docker compose up -d --build
+```
+
+The volume survives, so the queue and the OAuth grants come back with it. Clients
+stay logged in.
+
+### Backups
+
+`desk-data` is a named Docker volume, which Hyper Backup will not see. It holds
+your pending queue and the client grants, and losing it means re-authorising
+every client.
+
+```bash
+sudo docker run --rm -v fediverse-desk_desk-data:/data -v /volume1/backups:/backup   alpine tar czf /backup/desk-data.tar.gz -C /data .
+```
+
+Or bind-mount a shared folder instead of the named volume, and let Hyper Backup
+handle it as ordinary files. If you do, the container runs as uid 1000 (`node`),
+so the folder has to be writable by it.
+
+## Keep it running elsewhere
+
+If you are not using the container, systemd does the same job:
 
 ```ini
 # /etc/systemd/system/fediverse-desk.service
@@ -238,6 +364,9 @@ it.
 | `500` mentioning `/ghost/api/admin/identities/` with a 403 | The staff token is not Owner or Administrator, or it is an integration key. See the README's auth table |
 | Everything works but a post never appears | The bridge was down when the client fired. See "Decide where it runs first" |
 | Status with two images rejected | Ghost takes one image per note. This is deliberate: it refuses rather than dropping one silently |
+| Container is "unhealthy" | The process is not serving. `docker compose logs desk`. A missing `SHIM_PASSWORD` makes it exit at startup, on purpose |
+| Container is healthy but `desk status` fails | The probe only proves the process is up. This is the credential, not the container |
+| `Timed out waiting for ...json.lock` | A writer was killed mid-write and the lock outlived the stale window. If nothing else is running, delete the file the message names |
 
 ## Still unverified
 

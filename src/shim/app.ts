@@ -14,6 +14,8 @@ import {
   toMedia,
   toNodeInfo,
   toNodeInfoLinks,
+  toWebfinger,
+  parseWebfingerResource,
   toNotification,
   toStatus,
 } from './mastodon.js';
@@ -81,6 +83,38 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   router.get('/api/v2/instance', instanceHandler);
   router.get('/api/v1/instance/peers', () => json([]));
   router.get('/api/v1/custom_emojis', () => json([]));
+
+  router.get('/.well-known/webfinger', async ({ url }) => {
+    const resource = url.searchParams.get('resource') ?? '';
+    const parsed = parseWebfingerResource(resource);
+    if (!parsed) return error('resource is missing or malformed', 400);
+
+    let account;
+    try {
+      account = await social.me();
+    } catch {
+      // We cannot answer authoritatively without Ghost, and a 404 here would be
+      // a lie a client might cache. Say "try again" instead.
+      return error('Cannot reach the upstream publication', 503);
+    }
+
+    // One account, so the only question is whether the query is asking for it.
+    // Both the bridge's own host and the publication's real host are accepted:
+    // a client may have either, depending on how it found us.
+    const handle = account.handle.replace(/^@/, '');
+    const username = (handle.split('@')[0] ?? '').toLowerCase();
+    const ghostHost = (handle.split('@')[1] ?? '').toLowerCase();
+    const bridgeHost = new URL(publicUrl).host.toLowerCase();
+
+    const knownHost = parsed.host === bridgeHost || parsed.host === ghostHost;
+    if (!knownHost || parsed.username.toLowerCase() !== username) {
+      return error('No such account', 404);
+    }
+
+    return json(toWebfinger(account, `acct:${parsed.username}@${parsed.host}`), {
+      headers: { 'Content-Type': 'application/jrd+json; charset=utf-8' },
+    });
+  });
 
   // Checked before login, and before /api/v1/instance. See toNodeInfo.
   router.get('/.well-known/nodeinfo', () => json(toNodeInfoLinks(publicUrl)));

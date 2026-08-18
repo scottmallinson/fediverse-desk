@@ -29,8 +29,10 @@ const USAGE = `desk - a personal desk for a Ghost publication's Fediverse handle
       Publish everything that is due. Loops unless --once is given, so a cron
       entry wants --once and a long-running service does not.
 
-  desk shim [--port <n>] [--host <addr>]
+  desk shim [--port <n>] [--host <addr>] [--with-runner [--interval <seconds>]]
       Start the Mastodon-compatible bridge so publishing tools can log in.
+      --with-runner also drains the queue in the same process, which is what a
+      single always-on container wants: one service, one long-running writer.
 
   desk status                  Show who the handle is and whether auth works.
 
@@ -304,15 +306,44 @@ async function shim(config: Config, flags: Argv['flags']): Promise<number> {
   // would be a strange thing to do to a web server.
   const identity = new IdentityProvider(config.ghostUrl, config.staffToken);
   const social = new DirectSocialWeb(config.ghostUrl, identity);
+  const queue = Queue.open(config.dataDir);
 
   const handle = createApp({
     social,
     oauth: OAuthServer.open(config.dataDir, config.shim.password),
-    queue: Queue.open(config.dataDir),
+    queue,
     publicUrl: config.shim.publicUrl,
     version: VERSION,
     ghostUrl: config.ghostUrl,
   });
+
+  const controller = new AbortController();
+
+  // Running the queue in the bridge's own process keeps a container down to one
+  // service. The store is safe across processes either way, but one writer is
+  // one fewer thing to reason about.
+  if (flags['with-runner']) {
+    const seconds = Number(flagString(flags, 'interval') ?? 60);
+    const runner = new Runner(queue, social, {
+      onResult: (item, result) => {
+        const stamp = new Date().toISOString();
+        if (result.ok) {
+          process.stdout.write(`${stamp} sent ${item.id.slice(0, 8)} ${result.postUrl}\n`);
+        } else {
+          process.stderr.write(
+            `${stamp} failed ${item.id.slice(0, 8)}: ${result.error}\n`,
+          );
+        }
+      },
+    });
+
+    process.stdout.write(`Draining the queue every ${seconds}s in this process.\n`);
+    void watch(runner, seconds * 1000, controller.signal).catch((error: unknown) => {
+      process.stderr.write(
+        `queue runner stopped: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    });
+  }
 
   serve({
     host,
@@ -333,7 +364,10 @@ async function shim(config: Config, flags: Argv['flags']): Promise<number> {
   });
 
   return new Promise<number>((resolve) => {
-    const stop = () => resolve(0);
+    const stop = () => {
+      controller.abort();
+      resolve(0);
+    };
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
   });

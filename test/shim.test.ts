@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/shim/app.js';
-import { decodeId, encodeId, toStatus } from '../src/shim/mastodon.js';
+import {
+  decodeId,
+  encodeId,
+  parseWebfingerResource,
+  toStatus,
+} from '../src/shim/mastodon.js';
 import { LoginThrottle, OAuthServer, OOB_REDIRECT } from '../src/shim/oauth.js';
 import { Queue } from '../src/scheduler/queue.js';
 import { FakeSocialWeb, makePost, tempDir } from './helpers.js';
@@ -180,6 +185,98 @@ describe('shim', () => {
       const response = await handle(new Request('https://desk.example/api/v1/instance'));
       expect(response.status).toBe(200);
       expect((await response.json() as Record<string, unknown>).contact_account).toBeNull();
+    });
+  });
+
+  describe('webfinger', () => {
+    it('points at the Ghost actor, not at the bridge', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/.well-known/webfinger?resource=acct:scott@desk.example',
+        ),
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain('application/jrd+json');
+
+      const body = (await response.json()) as Record<string, any>;
+      expect(body.subject).toBe('acct:scott@desk.example');
+      expect(body.links[0]).toEqual({
+        rel: 'self',
+        type: 'application/activity+json',
+        href: 'https://example.com/.ghost/activitypub/users/index',
+      });
+    });
+
+    it('answers for the publication host as well as the bridge host', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/.well-known/webfinger?resource=acct:scott@example.com',
+        ),
+      );
+      expect(response.status).toBe(200);
+    });
+
+    it('accepts a bare handle and an https resource', async () => {
+      for (const resource of [
+        'scott@desk.example',
+        'https://desk.example/@scott',
+      ]) {
+        const response = await handle(
+          new Request(
+            `https://desk.example/.well-known/webfinger?resource=${encodeURIComponent(resource)}`,
+          ),
+        );
+        expect(response.status, resource).toBe(200);
+      }
+    });
+
+    it('404s for an account that is not the one account', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/.well-known/webfinger?resource=acct:someone@desk.example',
+        ),
+      );
+      expect(response.status).toBe(404);
+    });
+
+    it('404s for a host that is neither the bridge nor the publication', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/.well-known/webfinger?resource=acct:scott@elsewhere.example',
+        ),
+      );
+      expect(response.status).toBe(404);
+    });
+
+    it('400s on a malformed or missing resource', async () => {
+      for (const query of ['', '?resource=', '?resource=nonsense']) {
+        const response = await handle(
+          new Request(`https://desk.example/.well-known/webfinger${query}`),
+        );
+        expect(response.status, query).toBe(400);
+      }
+    });
+
+    it('says try again rather than no such account when Ghost is down', async () => {
+      social.failNext = new Error('Ghost is down');
+      const response = await handle(
+        new Request(
+          'https://desk.example/.well-known/webfinger?resource=acct:scott@desk.example',
+        ),
+      );
+
+      // A 404 here is a lie a client might cache.
+      expect(response.status).toBe(503);
+    });
+
+    it('needs no token', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/.well-known/webfinger?resource=acct:scott@desk.example',
+        ),
+      );
+      expect(response.status).not.toBe(401);
     });
   });
 
@@ -667,5 +764,39 @@ describe('shim', () => {
   it('answers an unknown route with 404 rather than a stack trace', async () => {
     const response = await handle(new Request('https://desk.example/api/v1/nope'));
     expect(response.status).toBe(404);
+  });
+});
+
+describe('parseWebfingerResource', () => {
+  it('reads the forms that turn up in the wild', () => {
+    expect(parseWebfingerResource('acct:scott@example.com')).toEqual({
+      username: 'scott',
+      host: 'example.com',
+    });
+    expect(parseWebfingerResource('scott@example.com')).toEqual({
+      username: 'scott',
+      host: 'example.com',
+    });
+    expect(parseWebfingerResource('acct:@scott@example.com')).toEqual({
+      username: 'scott',
+      host: 'example.com',
+    });
+    expect(parseWebfingerResource('https://example.com/@scott')).toEqual({
+      username: 'scott',
+      host: 'example.com',
+    });
+  });
+
+  it('lowercases the host but leaves the username alone', () => {
+    expect(parseWebfingerResource('acct:Scott@EXAMPLE.com')).toEqual({
+      username: 'Scott',
+      host: 'example.com',
+    });
+  });
+
+  it('returns null for anything it cannot read', () => {
+    for (const value of ['', '   ', 'nonsense', 'acct:', '@example.com', 'https://']) {
+      expect(parseWebfingerResource(value), value).toBeNull();
+    }
   });
 });

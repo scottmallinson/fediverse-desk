@@ -1,0 +1,41 @@
+# Synology Container Manager reads this as a Project. See DEPLOYMENT.md.
+services:
+  desk:
+    build: .
+    image: fediverse-desk:latest
+    container_name: fediverse-desk
+    restart: unless-stopped
+
+    # One container, one long-running writer: the bridge serves clients and
+    # drains the queue in the same process.
+    command: ["shim", "--with-runner", "--interval", "60"]
+
+    env_file:
+      - stack.env
+
+    # Loopback only. Cloudflare Tunnel reaches it; the LAN does not.
+    # Change to "4040:4040" if you are terminating TLS elsewhere on the network
+    # and understand that this port then accepts writes to your publication.
+    ports:
+      - "127.0.0.1:4040:4040"
+
+    volumes:
+      - desk-data:/data
+
+    # Nothing here needs to write outside /data or gain a privilege.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  desk-data:

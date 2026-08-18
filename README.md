@@ -46,7 +46,10 @@ machine rather than hosting it.
 
 ## Setup
 
-Needs Node 22 or newer.
+Needs Node 22 or newer. To run it as a container instead, skip to
+[DEPLOYMENT.md](DEPLOYMENT.md): the image carries no runtime dependencies, because
+the app uses nothing outside node's standard library.
+
 
 ```bash
 npm install
@@ -118,11 +121,17 @@ CLI process per inbound HTTP request would be a strange thing to do.
 ## The Mastodon bridge
 
 ```bash
-desk shim
+desk shim                  # bridge only
+desk shim --with-runner    # bridge, and drain the queue in the same process
 ```
 
 It refuses to start without `SHIM_PASSWORD`, binds to loopback by default, and
 says which of those two things it did on startup.
+
+`--with-runner` is what an always-on deployment wants: one service rather than
+two, and one long-running writer. The store locks and re-reads before every
+write, so running `desk queue add` from a shell against a live bridge is safe
+either way.
 
 To let a real client reach it, put a TLS proxy in front on a subdomain, set
 `SHIM_PUBLIC_URL` to that address, and point the client at it as if it were a
@@ -139,6 +148,7 @@ your bridge's domain as the server.
 | Endpoint | Behaviour |
 |---|---|
 | `GET /.well-known/nodeinfo`, `/nodeinfo/2.0` | Software discovery. Probed **before** anything else: a client decides whether to offer a Mastodon login on the strength of this |
+| `GET /.well-known/webfinger` | Handle resolution, answered by pointing at the **Ghost** actor rather than at the bridge. There is no actor here to point at |
 | `GET /api/v1/instance`, `/api/v2/instance` | Instance metadata. Public, because a client needs it before it can log in |
 | `POST /api/v1/apps` | Client registration |
 | `GET`/`POST /oauth/authorize` | Password login, then a code. Supports the out-of-band redirect |
@@ -186,13 +196,14 @@ can do.
 ## Development
 
 ```bash
-npm test          # 88 tests, no network
+npm test          # 106 tests
 npm run typecheck
 ```
 
-The tests use a fake `SocialWeb` and a fake `fetch`, so the whole suite runs
-offline. The OAuth flow, discovery, the id encoding, both transports and the
-scheduler's retry behaviour are all covered.
+The tests use a fake `SocialWeb` and a fake `fetch`, so almost all of it runs
+offline; the store's concurrency test spawns real processes. The OAuth flow, discovery, the id encoding, both transports, the scheduler's
+retry behaviour and the store's behaviour under concurrent writers are all
+covered.
 
 ## What has not been verified
 
