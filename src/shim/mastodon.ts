@@ -305,3 +305,51 @@ export function toInstance(options: {
     contact_account: options.account,
   };
 }
+
+/**
+ * Instance detection happens before login, and it does not go through
+ * /api/v1/instance: a client resolves /.well-known/nodeinfo first to find out
+ * what software a domain runs, and only offers a Mastodon login if it likes the
+ * answer. Without this the connect flow fails before it ever reaches the API,
+ * with an error that just says the server could not be reached.
+ *
+ * So software.name has to read "mastodon". That is a compatibility claim, not a
+ * boast, and the truth about what is actually answering lives in metadata where
+ * a human looking at the document will find it.
+ */
+export function toNodeInfoLinks(publicUrl: string): Record<string, unknown> {
+    return {
+        links: [
+            {
+                rel: 'http://nodeinfo.diaspora.software/ns/schema/2.0',
+                href: `${publicUrl.replace(/\/+$/, '')}/nodeinfo/2.0`,
+            },
+        ],
+    };
+}
+
+export function toNodeInfo(options: {
+    account: MastodonAccount | null;
+    version: string;
+    ghostUrl: string;
+}): Record<string, unknown> {
+    return {
+        version: '2.0',
+        software: { name: 'mastodon', version: '4.2.0' },
+        protocols: ['activitypub'],
+        services: { inbound: [], outbound: [] },
+        usage: {
+            users: { total: 1, activeMonth: 1, activeHalfyear: 1 },
+            localPosts: options.account?.statuses_count ?? 0,
+        },
+        openRegistrations: false,
+        metadata: {
+            nodeName: options.account?.display_name || 'fediverse-desk',
+            nodeDescription:
+                'A private bridge to one Ghost publication on the social web. Posts made ' +
+                'through this bridge federate from the Ghost actor, not from here.',
+            software: `fediverse-desk ${options.version}`,
+            upstream: options.ghostUrl,
+        },
+    };
+}

@@ -59,6 +59,7 @@ describe('shim', () => {
       queue: Queue.open(dir.path),
       publicUrl: 'https://desk.example',
       version: 'test',
+      ghostUrl: 'https://example.com',
       throttle: new LoginThrottle(3, 60_000),
     });
   });
@@ -136,6 +137,42 @@ describe('shim', () => {
       expect(body.uri).toBe('desk.example');
       expect(String(body.version)).toMatch(/^4\.2\.0 \(compatible; fediverse-desk/);
       expect(body.registrations).toBe(false);
+    });
+
+    it('points nodeinfo discovery at the 2.0 document', async () => {
+      const response = await handle(new Request('https://desk.example/.well-known/nodeinfo'));
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as { links: Array<Record<string, string>> };
+      expect(body.links[0]).toEqual({
+        rel: 'http://nodeinfo.diaspora.software/ns/schema/2.0',
+        href: 'https://desk.example/nodeinfo/2.0',
+      });
+    });
+
+    it('claims mastodon in nodeinfo, because clients gate the login on it', async () => {
+      const response = await handle(new Request('https://desk.example/nodeinfo/2.0'));
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as Record<string, any>;
+      expect(body.software.name).toBe('mastodon');
+      expect(body.protocols).toContain('activitypub');
+      expect(body.openRegistrations).toBe(false);
+    });
+
+    it('tells the truth about itself in nodeinfo metadata', async () => {
+      const response = await handle(new Request('https://desk.example/nodeinfo/2.0'));
+      const body = (await response.json()) as Record<string, any>;
+
+      expect(body.metadata.software).toBe('fediverse-desk test');
+      expect(body.metadata.upstream).toBe('https://example.com');
+    });
+
+    it('serves nodeinfo without a token, and without needing Ghost', async () => {
+      social.failNext = new Error('Ghost is down');
+      const response = await handle(new Request('https://desk.example/nodeinfo/2.0'));
+      expect(response.status).toBe(200);
+      expect((await response.json() as Record<string, any>).software.name).toBe('mastodon');
     });
 
     it('still answers when Ghost is unreachable, so login can proceed', async () => {

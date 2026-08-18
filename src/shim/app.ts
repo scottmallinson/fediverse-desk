@@ -12,6 +12,8 @@ import {
   toAccount,
   toInstance,
   toMedia,
+  toNodeInfo,
+  toNodeInfoLinks,
   toNotification,
   toStatus,
 } from './mastodon.js';
@@ -32,6 +34,8 @@ export interface ShimDependencies {
   queue: Queue;
   publicUrl: string;
   version: string;
+  /** The Ghost site the bridge fronts. Reported in nodeinfo metadata. */
+  ghostUrl: string;
   throttle?: LoginThrottle;
 }
 
@@ -48,7 +52,7 @@ const AUTHENTICATED_PREFIX = '/api/v1/';
  * did.
  */
 export function createApp(dependencies: ShimDependencies): (request: Request) => Promise<Response> {
-  const { social, oauth, queue, publicUrl, version } = dependencies;
+  const { social, oauth, queue, publicUrl, version, ghostUrl } = dependencies;
   const throttle = dependencies.throttle ?? new LoginThrottle();
   const router = new Router();
 
@@ -77,6 +81,19 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   router.get('/api/v2/instance', instanceHandler);
   router.get('/api/v1/instance/peers', () => json([]));
   router.get('/api/v1/custom_emojis', () => json([]));
+
+  // Checked before login, and before /api/v1/instance. See toNodeInfo.
+  router.get('/.well-known/nodeinfo', () => json(toNodeInfoLinks(publicUrl)));
+  router.get('/nodeinfo/2.0', async () => {
+    let account = null;
+    try {
+      account = await currentAccount();
+    } catch {
+      // Same reasoning as the instance route: discovery must not depend on Ghost
+      // being reachable this second.
+    }
+    return json(toNodeInfo({ account, version, ghostUrl }));
+  });
 
   // --- OAuth ----------------------------------------------------------------
 

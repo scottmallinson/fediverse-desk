@@ -126,7 +126,9 @@ says which of those two things it did on startup.
 
 To let a real client reach it, put a TLS proxy in front on a subdomain, set
 `SHIM_PUBLIC_URL` to that address, and point the client at it as if it were a
-Mastodon instance. The OAuth login asks for `SHIM_PASSWORD` and nothing else:
+Mastodon instance. [DEPLOYMENT.md](DEPLOYMENT.md) walks through that end to end:
+a Cloudflare Tunnel, a systemd unit, a curl script that proves the flow before
+you involve a client, and a table of what each failure means. The OAuth login asks for `SHIM_PASSWORD` and nothing else:
 there is one account and no signup.
 
 Connecting Buffer, for example, means adding a Mastodon channel and giving it
@@ -136,6 +138,7 @@ your bridge's domain as the server.
 
 | Endpoint | Behaviour |
 |---|---|
+| `GET /.well-known/nodeinfo`, `/nodeinfo/2.0` | Software discovery. Probed **before** anything else: a client decides whether to offer a Mastodon login on the strength of this |
 | `GET /api/v1/instance`, `/api/v2/instance` | Instance metadata. Public, because a client needs it before it can log in |
 | `POST /api/v1/apps` | Client registration |
 | `GET`/`POST /oauth/authorize` | Password login, then a code. Supports the out-of-band redirect |
@@ -183,13 +186,13 @@ can do.
 ## Development
 
 ```bash
-npm test          # 84 tests, no network
+npm test          # 88 tests, no network
 npm run typecheck
 ```
 
 The tests use a fake `SocialWeb` and a fake `fetch`, so the whole suite runs
-offline. The OAuth flow, the id encoding, both transports and the scheduler's
-retry behaviour are all covered.
+offline. The OAuth flow, discovery, the id encoding, both transports and the
+scheduler's retry behaviour are all covered.
 
 ## What has not been verified
 
@@ -206,7 +209,12 @@ someone runs `desk status` with one, these remain unconfirmed:
 - whether `upload/image` accepts the same MIME set as Ghost's own uploader
 - whether any rate limit applies on Ghost Pro, which proxies this service
 
-`desk status` is the ten-minute check that settles all three.
+`desk status` is the ten-minute check that settles all three, and the curl
+walkthrough in [DEPLOYMENT.md](DEPLOYMENT.md) settles them against the bridge.
+
+No real client has completed the connect flow yet either. Discovery now matches
+what a live Mastodon instance serves, which was the most likely thing to block
+it, but that is reasoning rather than evidence.
 
 ## Licence
 

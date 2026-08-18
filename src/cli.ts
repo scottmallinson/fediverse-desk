@@ -311,6 +311,7 @@ async function shim(config: Config, flags: Argv['flags']): Promise<number> {
     queue: Queue.open(config.dataDir),
     publicUrl: config.shim.publicUrl,
     version: VERSION,
+    ghostUrl: config.ghostUrl,
   });
 
   serve({
