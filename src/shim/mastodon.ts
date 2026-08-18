@@ -1,0 +1,307 @@
+import type { Account, Attachment, Notification, Post } from '../ghost/types.js';
+
+/**
+ * Ghost identifies posts and accounts by their ActivityPub URL. Mastodon ids are
+ * opaque strings that clients put straight into a path segment, and a URL has
+ * slashes in it, so every id crossing this boundary is base64url encoded.
+ *
+ * Clients that sort by id, or assume ids are snowflakes, will get this wrong.
+ * That is a known and accepted limitation: the shim exists so publishing tools
+ * can post, not so a timeline reader can page backwards through history.
+ */
+export function encodeId(apId: string): string {
+  return Buffer.from(apId, 'utf8').toString('base64url');
+}
+
+export function decodeId(id: string): string {
+  const decoded = Buffer.from(id, 'base64url').toString('utf8');
+  if (!/^https?:\/\//.test(decoded)) {
+    throw new Error(`"${id}" is not an id this shim issued.`);
+  }
+  return decoded;
+}
+
+export interface MastodonAccount {
+  id: string;
+  username: string;
+  acct: string;
+  display_name: string;
+  locked: boolean;
+  bot: boolean;
+  discoverable: boolean;
+  group: boolean;
+  created_at: string;
+  note: string;
+  url: string;
+  avatar: string;
+  avatar_static: string;
+  header: string;
+  header_static: string;
+  followers_count: number;
+  following_count: number;
+  statuses_count: number;
+  last_status_at: string | null;
+  emojis: never[];
+  fields: Array<{ name: string; value: string; verified_at: string | null }>;
+}
+
+const BLANK_IMAGE = '';
+
+export function toAccount(account: Account): MastodonAccount {
+  const handle = account.handle.replace(/^@/, '');
+  const username = handle.split('@')[0] ?? handle;
+  const avatar = account.avatarUrl ?? BLANK_IMAGE;
+  const header = account.bannerImageUrl ?? BLANK_IMAGE;
+
+  return {
+    id: encodeId(account.apId || account.id),
+    username,
+    acct: handle,
+    display_name: account.name ?? '',
+    locked: false,
+    bot: false,
+    discoverable: true,
+    group: false,
+    created_at: new Date(0).toISOString(),
+    note: account.bio ?? '',
+    url: account.url ?? '',
+    avatar,
+    avatar_static: avatar,
+    header,
+    header_static: header,
+    followers_count: account.followerCount ?? 0,
+    following_count: account.followingCount ?? 0,
+    statuses_count: account.postCount ?? 0,
+    last_status_at: null,
+    emojis: [],
+    fields: Object.entries(account.customFields ?? {}).map(([name, value]) => ({
+      name,
+      value,
+      verified_at: null,
+    })),
+  };
+}
+
+/**
+ * A post's author arrives as the trimmed AuthorDTO, which has no counts and no
+ * bio. Filling those with zeroes is correct: they are unknown, not zero, but
+ * every client treats a missing number as a crash and a zero as "not shown".
+ */
+function authorToAccount(author: Post['author']): MastodonAccount {
+  const handle = author.handle.replace(/^@/, '');
+  return {
+    id: encodeId(author.id),
+    username: handle.split('@')[0] ?? handle,
+    acct: handle,
+    display_name: author.name ?? '',
+    locked: false,
+    bot: false,
+    discoverable: true,
+    group: false,
+    created_at: new Date(0).toISOString(),
+    note: '',
+    url: author.url ?? '',
+    avatar: author.avatarUrl ?? BLANK_IMAGE,
+    avatar_static: author.avatarUrl ?? BLANK_IMAGE,
+    header: BLANK_IMAGE,
+    header_static: BLANK_IMAGE,
+    followers_count: 0,
+    following_count: 0,
+    statuses_count: 0,
+    last_status_at: null,
+    emojis: [],
+    fields: [],
+  };
+}
+
+export interface MastodonMedia {
+  id: string;
+  type: 'image' | 'unknown';
+  url: string;
+  preview_url: string;
+  remote_url: string | null;
+  text_url: null;
+  description: string | null;
+  blurhash: null;
+  meta: Record<string, never>;
+}
+
+export function toMedia(url: string, description?: string | null): MastodonMedia {
+  return {
+    id: encodeId(url),
+    type: 'image',
+    url,
+    preview_url: url,
+    remote_url: null,
+    text_url: null,
+    description: description ?? null,
+    blurhash: null,
+    meta: {},
+  };
+}
+
+function attachmentToMedia(attachment: Attachment): MastodonMedia {
+  const media = toMedia(attachment.url, attachment.name || null);
+  if (!attachment.mediaType.startsWith('image/')) media.type = 'unknown';
+  return media;
+}
+
+export interface MastodonStatus {
+  id: string;
+  uri: string;
+  url: string;
+  created_at: string;
+  account: MastodonAccount;
+  content: string;
+  visibility: 'public';
+  sensitive: boolean;
+  spoiler_text: string;
+  media_attachments: MastodonMedia[];
+  mentions: never[];
+  tags: never[];
+  emojis: never[];
+  reblogs_count: number;
+  favourites_count: number;
+  replies_count: number;
+  favourited: boolean;
+  reblogged: boolean;
+  muted: boolean;
+  bookmarked: boolean;
+  pinned: boolean;
+  in_reply_to_id: string | null;
+  in_reply_to_account_id: string | null;
+  reblog: null;
+  application: { name: string; website: null } | null;
+  language: string | null;
+  text: null;
+  card: null;
+  poll: null;
+}
+
+export function toStatus(post: Post, options: { inReplyTo?: string | null } = {}): MastodonStatus {
+  const content = post.content || post.excerpt || post.title || '';
+
+  return {
+    id: encodeId(post.id),
+    uri: post.id,
+    url: post.url || post.id,
+    created_at: new Date(post.publishedAt ?? Date.now()).toISOString(),
+    account: authorToAccount(post.author),
+    content,
+    visibility: 'public',
+    sensitive: false,
+    spoiler_text: '',
+    media_attachments: (post.attachments ?? []).map(attachmentToMedia),
+    mentions: [],
+    tags: [],
+    emojis: [],
+    reblogs_count: post.repostCount ?? 0,
+    favourites_count: post.likeCount ?? 0,
+    replies_count: post.replyCount ?? 0,
+    favourited: post.likedByMe ?? false,
+    reblogged: post.repostedByMe ?? false,
+    muted: false,
+    bookmarked: false,
+    pinned: false,
+    in_reply_to_id: options.inReplyTo ? encodeId(options.inReplyTo) : null,
+    in_reply_to_account_id: null,
+    reblog: null,
+    application: null,
+    language: null,
+    text: null,
+    card: null,
+    poll: null,
+  };
+}
+
+const NOTIFICATION_TYPES = {
+  like: 'favourite',
+  repost: 'reblog',
+  reply: 'mention',
+  mention: 'mention',
+  follow: 'follow',
+} as const;
+
+export function toNotification(notification: Notification): Record<string, unknown> {
+  const post = notification.post;
+  return {
+    id: notification.id,
+    type: NOTIFICATION_TYPES[notification.type] ?? 'mention',
+    created_at: new Date(notification.createdAt ?? Date.now()).toISOString(),
+    account: authorToAccount(notification.actor),
+    status: post
+      ? {
+          ...toStatus({
+            id: post.id,
+            type: post.type,
+            title: post.title,
+            excerpt: '',
+            summary: null,
+            content: post.content,
+            url: post.url,
+            featureImageUrl: null,
+            publishedAt: notification.createdAt,
+            likeCount: post.likeCount,
+            likedByMe: post.likedByMe,
+            replyCount: post.replyCount,
+            readingTimeMinutes: 0,
+            attachments: post.attachments ?? [],
+            author: notification.actor,
+            authoredByMe: false,
+            repostCount: post.repostCount,
+            repostedByMe: post.repostedByMe,
+            repostedBy: null,
+          }),
+        }
+      : null,
+  };
+}
+
+export function toInstance(options: {
+  publicUrl: string;
+  account: MastodonAccount | null;
+  version: string;
+}): Record<string, unknown> {
+  const host = new URL(options.publicUrl).host;
+  return {
+    uri: host,
+    title: options.account?.display_name || host,
+    short_description: 'A private bridge to one Ghost publication on the social web.',
+    description: 'A private bridge to one Ghost publication on the social web.',
+    email: '',
+    // Clients gate features on this. Claiming a modern Mastodon keeps them from
+    // falling back to behaviour this shim does not implement, and the suffix
+    // keeps it honest about what is actually answering.
+    version: `4.2.0 (compatible; fediverse-desk ${options.version})`,
+    urls: {},
+    stats: {
+      user_count: 1,
+      status_count: options.account?.statuses_count ?? 0,
+      domain_count: 0,
+    },
+    thumbnail: options.account?.avatar || null,
+    languages: ['en'],
+    registrations: false,
+    approval_required: true,
+    invites_enabled: false,
+    configuration: {
+      statuses: {
+        max_characters: 5000,
+        max_media_attachments: 1,
+        characters_reserved_per_url: 23,
+      },
+      media_attachments: {
+        supported_mime_types: [
+          'image/jpeg',
+          'image/png',
+          'image/gif',
+          'image/webp',
+          'image/avif',
+        ],
+        image_size_limit: 10 * 1024 * 1024,
+      },
+      polls: { max_options: 0 },
+    },
+    contact_account: options.account,
+  };
+}
