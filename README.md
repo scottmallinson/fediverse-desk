@@ -196,7 +196,7 @@ can do.
 ## Development
 
 ```bash
-npm test          # 106 tests
+npm test          # 110 tests
 npm run typecheck
 ```
 
@@ -236,6 +236,14 @@ walkthrough in [DEPLOYMENT.md](DEPLOYMENT.md) settles them against the bridge.
 No real client has completed the connect flow yet either. Discovery now matches
 what a live Mastodon instance serves, which was the most likely thing to block
 it, but that is reasoning rather than evidence.
+
+This is not a hypothetical worry. Reading Ghost's source closely enough to write
+the reply path turned up a real defect in this client: `actions/note` returns
+`{post}` but `actions/reply` returns the federated Create activity, and reading
+`.post` off that produced undefined. Every reply would have failed. Nothing in
+the test suite caught it, because the fakes returned what the code expected
+rather than what Ghost sends. Assume there are more of those until a real token
+has been through the whole surface.
 
 ## Licence
 

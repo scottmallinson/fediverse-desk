@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { extractReplyApId, extractWrappedPost, synthesisePost } from './reply.js';
 import type {
   Account,
   Notification,
@@ -143,7 +144,7 @@ export class GhstSocialWeb implements SocialWeb {
   }
 
   async reply(postId: string, input: NoteInput): Promise<Post> {
-    const body = await this.run<{ post: Post }>([
+    const body = await this.run<unknown>([
       'socialweb',
       'reply',
       postId,
@@ -151,7 +152,21 @@ export class GhstSocialWeb implements SocialWeb {
       input.content,
       ...imageArgs(input),
     ]);
-    return body.post;
+
+    // ghst passes the endpoint's response through untouched, so this is the
+    // same Create activity the direct transport has to unpick. Same rule after
+    // this line: the reply is out, so nothing here may throw.
+    const wrapped = extractWrappedPost(body);
+    if (wrapped) return wrapped;
+
+    const apId = extractReplyApId(body);
+    if (!apId) return synthesisePost(body, '', input.content);
+
+    try {
+      return await this.run<Post>(['socialweb', 'post', apId]);
+    } catch {
+      return synthesisePost(body, apId, input.content);
+    }
   }
 
   async deletePost(postId: string): Promise<void> {

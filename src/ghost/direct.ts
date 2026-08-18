@@ -1,4 +1,5 @@
 import { IdentityProvider, type Fetcher } from './identity.js';
+import { extractReplyApId, extractWrappedPost, synthesisePost } from './reply.js';
 import type {
   Account,
   Notification,
@@ -94,12 +95,30 @@ export class DirectSocialWeb implements SocialWeb {
   }
 
   async reply(postId: string, input: NoteInput): Promise<Post> {
-    const body = await this.request<{ post: Post }>(
+    const body = await this.request<unknown>(
       'POST',
       `v1/actions/reply/${encodeURIComponent(postId)}`,
       { body: toNoteBody(input) },
     );
-    return body.post;
+
+    // Past this line the reply is published. Nothing below may throw, or the
+    // scheduler will retry an item that already went out.
+    const wrapped = extractWrappedPost(body);
+    if (wrapped) return wrapped;
+
+    const apId = extractReplyApId(body);
+    if (!apId) return synthesisePost(body, '', input.content);
+
+    try {
+      return await this.post(apId);
+    } catch {
+      return synthesisePost(body, apId, input.content);
+    }
+  }
+
+  /** The canonical post, by its ActivityPub id. Returns a bare PostDTO. */
+  post(apId: string): Promise<Post> {
+    return this.request<Post>('GET', `v1/post/${encodeURIComponent(apId)}`);
   }
 
   deletePost(postId: string): Promise<void> {

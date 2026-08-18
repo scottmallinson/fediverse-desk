@@ -237,3 +237,96 @@ describe('GhstSocialWeb', () => {
     expect(seenPath).not.toContain('/etc/passwd');
   });
 });
+
+/**
+ * The shape Ghost's actions/reply actually returns: the federated Create
+ * activity, with the new Note embedded and no PostDTO anywhere. Transcribed
+ * from the Note/Create construction in TryGhost/ActivityPub's post controller.
+ */
+function createActivity(noteId: string) {
+  return {
+    '@context': ['https://www.w3.org/ns/activitystreams'],
+    type: 'Create',
+    id: 'https://example.com/.ghost/activitypub/create/abc-123',
+    actor: 'https://example.com/.ghost/activitypub/users/index',
+    object: {
+      type: 'Note',
+      id: noteId,
+      content: 'agreed',
+      published: '2026-08-18T10:00:00.000Z',
+      inReplyTo: 'https://other.example/users/alice/statuses/1',
+    },
+    to: ['https://www.w3.org/ns/activitystreams#Public'],
+  };
+}
+
+describe('replying', () => {
+  const NOTE_ID = 'https://example.com/.ghost/activitypub/note/99';
+
+  it('reads the new note back, because the reply endpoint returns an activity', async () => {
+    const { client, seen } = directClient((request) =>
+      request.method === 'POST'
+        ? new Response(JSON.stringify(createActivity(NOTE_ID)))
+        : new Response(JSON.stringify(makePost({ id: NOTE_ID, content: 'agreed' }))),
+    );
+
+    const post = await client.reply('https://other.example/users/alice/statuses/1', {
+      content: 'agreed',
+    });
+
+    // Two calls: publish, then fetch the canonical post by its ActivityPub id.
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.url).toBe(
+      `https://example.com/.ghost/activitypub/v1/post/${encodeURIComponent(NOTE_ID)}`,
+    );
+    expect(post.id).toBe(NOTE_ID);
+    expect(post.url).toBe('https://example.com/notes/1');
+  });
+
+  it('never throws once the reply is out, so the queue cannot double post', async () => {
+    const { client } = directClient((request) =>
+      request.method === 'POST'
+        ? new Response(JSON.stringify(createActivity(NOTE_ID)))
+        : // The read back fails. The reply is already published.
+          new Response('nope', { status: 500 }),
+    );
+
+    const post = await client.reply('https://other.example/users/alice/statuses/1', {
+      content: 'agreed',
+    });
+
+    expect(post.id).toBe(NOTE_ID);
+    expect(post.url).toBe(NOTE_ID);
+    expect(post.content).toBe('agreed');
+  });
+
+  it('still works if Ghost ever switches to the note endpoint shape', async () => {
+    const { client, seen } = directClient(
+      () => new Response(JSON.stringify({ post: makePost({ id: NOTE_ID }) })),
+    );
+
+    const post = await client.reply('https://other.example/users/alice/statuses/1', {
+      content: 'agreed',
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(post.id).toBe(NOTE_ID);
+  });
+
+  it('does the same two steps through ghst', async () => {
+    const calls: string[][] = [];
+    const { client } = ghstClient((args) => {
+      calls.push(args);
+      return args[1] === 'reply'
+        ? { stdout: JSON.stringify(createActivity(NOTE_ID)) }
+        : { stdout: JSON.stringify(makePost({ id: NOTE_ID })) };
+    });
+
+    const post = await client.reply('https://other.example/users/alice/statuses/1', {
+      content: 'agreed',
+    });
+
+    expect(calls[1]).toEqual(['socialweb', 'post', NOTE_ID, '--json']);
+    expect(post.id).toBe(NOTE_ID);
+  });
+});
