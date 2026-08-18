@@ -1,8 +1,10 @@
 # Synology Container Manager reads this as a Project. See DEPLOYMENT.md.
 services:
   desk:
+    # Published by .github/workflows/ci.yml. `docker compose pull` fetches it;
+    # `docker compose up --build` builds the same thing locally instead.
+    image: ghcr.io/scottmallinson/fediverse-desk:latest
     build: .
-    image: fediverse-desk:latest
     container_name: fediverse-desk
     restart: unless-stopped
 

@@ -203,20 +203,40 @@ vi stack.env          # GHOST_URL, the staff token, SHIM_PUBLIC_URL, SHIM_PASSWO
 `stack.env` holds a token that is full admin on your site. It is gitignored, and
 mode 600 is worth setting even so.
 
+### Sign in to the registry
+
+CI builds the image and publishes it to GitHub Container Registry. The repository
+is private, so the package is too, and the NAS needs to authenticate once.
+
+Create a personal access token with the `read:packages` scope, then:
+
+```bash
+echo "<token>" | sudo docker login ghcr.io -u scottmallinson --password-stdin
+```
+
+If you would rather not hold a token on the NAS, skip this and build locally
+instead: `sudo docker compose up -d --build`. A DS1821+ builds this in well under
+a minute, since the image installs no runtime dependencies.
+
 ### Create the project
 
 In DSM: **Container Manager** -> **Project** -> **Create**, set the path to the
-folder you just made, and it will pick up `docker-compose.yml`. Build and start.
+folder you just made, and it will pick up `docker-compose.yml`. Start it.
 
-Or from SSH, which gives you the build output when something goes wrong:
+Or from SSH, which gives you the output when something goes wrong:
 
 ```bash
-sudo docker compose up -d --build
+sudo docker compose pull
+sudo docker compose up -d
 sudo docker compose logs -f
 ```
 
 You should see the bridge report the address it is serving, and the queue runner
 report its interval.
+
+The compose file names the published image and keeps a `build:` section, so both
+routes work from the same file: `pull` fetches what CI built, `up --build` builds
+the identical thing on the NAS.
 
 ### Check it from the NAS itself
 
@@ -273,12 +293,17 @@ the default here.
 
 ```bash
 cd /volume1/docker/fediverse-desk
-git pull
-sudo docker compose up -d --build
+git pull                      # for docker-compose.yml changes
+sudo docker compose pull
+sudo docker compose up -d
 ```
 
 The volume survives, so the queue and the OAuth grants come back with it. Clients
 stay logged in.
+
+`latest` moves with `main`. To pin a known-good build instead, set the tag to a
+release version or a commit: CI publishes `sha-<commit>` for every build, so
+rolling back is editing one line and running the two commands again.
 
 ### Backups
 

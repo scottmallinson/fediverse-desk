@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The image build needs to write a package; nothing else needs more than read.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      # There are no runtime dependencies, so this installs devDependencies only.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # One suite spawns real child processes to prove the store's lock holds
+      # across them, so this needs a real filesystem rather than a mocked one.
+      - name: Test
+        run: npm test
+
+  image:
+    name: Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # A pull request gets built but not published: the point is to find a
+      # broken Dockerfile before it lands, not to publish from a fork.
+      - name: Log in to the registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # The DS1821+ is x86-64. Building arm64 as well would double the time
+          # for a platform nothing here runs on.
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          # Always load it locally too, so the smoke test below runs the exact
+          # image that was just built rather than pulling one back down.
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Proves the image actually serves, rather than only that it built. The
+      # bridge refuses to start without a password, so give it a throwaway one.
+      - name: Smoke test the image
+        run: |
+          IMAGE=$(echo '${{ steps.meta.outputs.tags }}' | head -n1)
+          docker run -d --name desk-smoke \
+            -e GHOST_URL=https://example.com \
+            -e GHOST_STAFF_ACCESS_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+            -e SHIM_PASSWORD=smoke \
+            -e SHIM_PUBLIC_URL=https://desk.example.com \
+            -p 4040:4040 "$IMAGE"
+
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4040/.well-known/nodeinfo >/dev/null; then break; fi
+            sleep 1
+          done
+
+          echo "--- nodeinfo ---"
+          curl -fsS http://127.0.0.1:4040/.well-known/nodeinfo
+
+          # nodeinfo must name mastodon or no client will offer a login.
+          curl -fsS http://127.0.0.1:4040/nodeinfo/2.0 | grep -q '"name":"mastodon"'
+
+          # And an unauthenticated write must still be refused.
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            http://127.0.0.1:4040/api/v1/statuses -d 'status=nope')
+          test "$code" = "401" || { echo "expected 401, got $code"; exit 1; }
+
+          echo "--- container health ---"
+          docker inspect --format '{{.State.Health.Status}}' desk-smoke
+
+      - name: Container logs
+        if: always()
+        run: docker logs desk-smoke || true
+
+      - name: Stop the smoke test
+        if: always()
+        run: docker rm -f desk-smoke || true

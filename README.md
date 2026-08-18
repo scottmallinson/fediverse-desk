@@ -200,6 +200,16 @@ npm test          # 106 tests
 npm run typecheck
 ```
 
+CI (`.github/workflows/ci.yml`) runs both on every push and pull request, then
+builds the image and publishes it to GitHub Container Registry as
+`ghcr.io/scottmallinson/fediverse-desk`. Pull requests build the image but do not
+publish it.
+
+The build is followed by a smoke test that starts the container and checks the
+three things a broken image would break silently: that it serves nodeinfo, that
+nodeinfo names mastodon (without which no client offers a login), and that an
+unauthenticated write is still refused.
+
 The tests use a fake `SocialWeb` and a fake `fetch`, so almost all of it runs
 offline; the store's concurrency test spawns real processes. The OAuth flow, discovery, the id encoding, both transports, the scheduler's
 retry behaviour and the store's behaviour under concurrent writers are all
