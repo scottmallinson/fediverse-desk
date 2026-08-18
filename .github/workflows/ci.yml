@@ -122,8 +122,20 @@ jobs:
             http://127.0.0.1:4040/api/v1/statuses -d 'status=nope')
           test "$code" = "401" || { echo "expected 401, got $code"; exit 1; }
 
-          echo "--- container health ---"
-          docker inspect --format '{{.State.Health.Status}}' desk-smoke
+          # Wait for the HEALTHCHECK the image declares to actually report in.
+          # Reading the status straight after startup only ever prints
+          # "starting", which asserts nothing: docker has not run a probe yet.
+          echo "--- waiting for the declared healthcheck ---"
+          for i in $(seq 1 60); do
+            health=$(docker inspect --format '{{.State.Health.Status}}' desk-smoke)
+            echo "health: $health"
+            case "$health" in
+              healthy) break ;;
+              unhealthy) echo "container went unhealthy"; exit 1 ;;
+            esac
+            sleep 2
+          done
+          test "$health" = "healthy" || { echo "never became healthy"; exit 1; }
 
       - name: Container logs
         if: always()
