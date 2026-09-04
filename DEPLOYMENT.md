@@ -37,7 +37,7 @@ fires, the post is lost, and you will find out late. So pick one:
 
 | Where the bridge runs | What to do |
 |---|---|
-| Somewhere always on (a NAS, a VPS, a Pi) | Let Buffer own the schedule. See [Running it on a Synology NAS](#running-it-on-a-synology-nas) |
+| Somewhere always on (a NAS, a VPS, a Pi) | Let Buffer own the schedule. See [Running it on a Synology NAS](#running-it-on-a-synology-nas), or [VPS.md](VPS.md) for a public box |
 | Your laptop | Do **not** let Buffer schedule to it. Queue Fediverse posts with `desk queue add` and leave Buffer to the channels it already handles |
 
 The second row is not a lesser option. The bridge is still worth running on a
@@ -63,6 +63,8 @@ Leave the bridge itself on loopback. The tunnel is what reaches it.
 ### Alternatives
 
 - **A small VPS** with a reverse proxy. Ordinary, and you own the whole path.
+  [VPS.md](VPS.md) does this end to end on Ubuntu, with Caddy terminating TLS and
+  renewing the certificate itself.
 - **Tailscale Funnel** for a public name without a server, or plain Tailscale if
   only your own devices need to reach it. Plain Tailscale is enough for a mobile
   client and not enough for Buffer.

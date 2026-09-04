@@ -1,0 +1,33 @@
+# TLS in front of the bridge, for a VPS with a public address. See VPS.md.
+#
+# DESK_DOMAIN and ACME_EMAIL come from caddy.env. Caddy substitutes {$VAR} from
+# its own environment when it loads this file, so nothing here is edited per
+# machine and `git pull` never conflicts with local changes.
+{
+	# Where Let's Encrypt sends expiry warnings if renewal ever stops working.
+	email {$ACME_EMAIL}
+}
+
+{$DESK_DOMAIN} {
+	encode zstd gzip
+
+	# This host is an authenticated write endpoint for the publication. None of
+	# it should be indexed, framed, or leaked through a referrer.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		X-Robots-Tag "noindex, nofollow"
+	}
+
+	# The service name resolves on the compose network, so the bridge itself
+	# never needs a port published to the internet. Bodies are passed straight
+	# through: the app caps them at 12MB, and a second, slightly different limit
+	# out here would only turn a clear 413 into a confusing one.
+	reverse_proxy desk:4040
+
+	log {
+		output stdout
+	}
+}

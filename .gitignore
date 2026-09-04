@@ -11,3 +11,6 @@ data/
 
 # Container Manager environment file, holds the staff token
 stack.env
+
+# The proxy's environment file: not secret, but per-machine
+caddy.env

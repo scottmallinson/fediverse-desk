@@ -48,7 +48,8 @@ machine rather than hosting it.
 
 Needs Node 22 or newer. To run it as a container instead, skip to
 [DEPLOYMENT.md](DEPLOYMENT.md): the image carries no runtime dependencies, because
-the app uses nothing outside node's standard library.
+the app uses nothing outside node's standard library. [VPS.md](VPS.md) is the
+same thing on a public Ubuntu box, with TLS.
 
 
 ```bash
@@ -137,7 +138,9 @@ To let a real client reach it, put a TLS proxy in front on a subdomain, set
 `SHIM_PUBLIC_URL` to that address, and point the client at it as if it were a
 Mastodon instance. [DEPLOYMENT.md](DEPLOYMENT.md) walks through that end to end:
 a Cloudflare Tunnel, a systemd unit, a curl script that proves the flow before
-you involve a client, and a table of what each failure means. The OAuth login asks for `SHIM_PASSWORD` and nothing else:
+you involve a client, and a table of what each failure means. [VPS.md](VPS.md)
+is the step-by-step for a public VPS, where Caddy terminates TLS on the same box.
+The OAuth login asks for `SHIM_PASSWORD` and nothing else:
 there is one account and no signup.
 
 Connecting Buffer, for example, means adding a Mastodon channel and giving it
