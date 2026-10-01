@@ -133,10 +133,15 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
 
   router.post('/api/v1/apps', async ({ request }) => {
     const params = await readParams(request);
+    // Mastodon documents redirect_uris as a newline-separated string, so a client
+    // registering several URIs (or one with stray whitespace) sends them in one
+    // value. Split every value so each URI is stored on its own.
     const redirectUris = [
       ...many(params, 'redirect_uris'),
       ...many(params, 'redirect_uri'),
-    ].filter(Boolean);
+    ]
+      .flatMap((value) => value.split(/\s+/))
+      .filter(Boolean);
 
     const { app, clientSecret } = await oauth.registerApp({
       name: one(params, 'client_name') ?? '',

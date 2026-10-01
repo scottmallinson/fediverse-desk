@@ -370,6 +370,27 @@ describe('shim', () => {
       expect(location.searchParams.get('state')).toBe('xyz123');
     });
 
+    it('registers each URI of a newline-separated redirect_uris value', async () => {
+      const second = 'https://other.example/callback';
+      const response = await handle(
+        new Request('https://desk.example/api/v1/apps', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_name: 'Buffer', redirect_uris: `${REDIRECT}\n${second}\n` }),
+        }),
+      );
+      const { client_id: clientId } = (await response.json()) as { client_id: string };
+
+      for (const uri of [REDIRECT, second]) {
+        const authorize = await handle(
+          new Request(
+            `https://desk.example/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(uri)}&response_type=code`,
+          ),
+        );
+        expect(authorize.status).toBe(200);
+      }
+    });
+
     it('shows the code on a page for out-of-band clients', async () => {
       const response = await handle(
         new Request('https://desk.example/api/v1/apps', {
