@@ -133,15 +133,20 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
 
   router.post('/api/v1/apps', async ({ request }) => {
     const params = await readParams(request);
+    // Mastodon documents redirect_uris as a newline-separated string, so a client
+    // registering several URIs (or one with stray whitespace) sends them in one
+    // value. Split every value so each URI is stored on its own.
     const redirectUris = [
       ...many(params, 'redirect_uris'),
       ...many(params, 'redirect_uri'),
-    ].filter(Boolean);
+    ]
+      .flatMap((value) => value.split(/\s+/))
+      .filter(Boolean);
 
     const { app, clientSecret } = await oauth.registerApp({
       name: one(params, 'client_name') ?? '',
       redirectUris,
-      scopes: one(params, 'scopes') ?? 'read write',
+      scopes: one(params, 'scopes'),
       website: one(params, 'website') ?? null,
     });
 
@@ -154,6 +159,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       client_id: app.clientId,
       client_secret: clientSecret,
       scopes: app.scopes.split(' '),
+      client_secret_expires_at: 0,
       vapid_key: '',
     });
   });
@@ -161,20 +167,30 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   router.get('/oauth/authorize', async ({ url }) => {
     const clientId = url.searchParams.get('client_id') ?? '';
     const redirectUri = url.searchParams.get('redirect_uri') ?? '';
-    const scope = url.searchParams.get('scope') ?? 'read write';
+    const scope = url.searchParams.get('scope') || 'read';
     const state = url.searchParams.get('state') ?? '';
+    const codeChallenge = pkceChallenge(
+      url.searchParams.get('code_challenge'),
+      url.searchParams.get('code_challenge_method'),
+    );
 
     const app = await oauth.checkRedirect(clientId, redirectUri);
-    return html(loginPage({ app: app.name, clientId, redirectUri, scope, state }));
+    return html(
+      loginPage({ app: app.name, clientId, redirectUri, scope, state, codeChallenge }),
+    );
   });
 
   router.post('/oauth/authorize', async ({ request }) => {
     const params = await readParams(request);
     const clientId = one(params, 'client_id') ?? '';
     const redirectUri = one(params, 'redirect_uri') ?? '';
-    const scope = one(params, 'scope') ?? 'read write';
+    const scope = one(params, 'scope') || 'read';
     const state = one(params, 'state') ?? '';
     const password = one(params, 'password') ?? '';
+    const codeChallenge = pkceChallenge(
+      one(params, 'code_challenge'),
+      one(params, 'code_challenge_method'),
+    );
 
     const app = await oauth.checkRedirect(clientId, redirectUri);
 
@@ -186,6 +202,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
           redirectUri,
           scope,
           state,
+          codeChallenge,
           message: 'Too many attempts. Wait fifteen minutes and try again.',
         }),
         { status: 429 },
@@ -201,6 +218,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
           redirectUri,
           scope,
           state,
+          codeChallenge,
           message: 'That password was not right.',
         }),
         { status: 401 },
@@ -208,7 +226,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     }
 
     throttle.reset(clientId);
-    const code = await oauth.issueCode(clientId, redirectUri, scope);
+    const code = await oauth.issueCode(clientId, redirectUri, scope, codeChallenge);
 
     if (redirectUri === OOB_REDIRECT) {
       return html(oobPage(code));
@@ -227,8 +245,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     const clientSecret = one(params, 'client_secret') ?? '';
 
     if (grantType === 'client_credentials') {
-      const app = await oauth.findApp(clientId);
-      if (!app) throw new OAuthError('invalid_client', 'Unknown client_id.', 401);
+      await oauth.authenticateClient(clientId, clientSecret);
       const token = await oauth.issueToken(clientId, 'read');
       return json({
         access_token: token,
@@ -247,6 +264,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       clientSecret,
       code: one(params, 'code') ?? '',
       redirectUri: one(params, 'redirect_uri') ?? '',
+      codeVerifier: one(params, 'code_verifier'),
     });
 
     return json({
@@ -474,12 +492,25 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** Mastodon supports PKCE with S256 only; anything else is refused, not ignored. */
+function pkceChallenge(
+  challenge: string | null | undefined,
+  method: string | null | undefined,
+): string | undefined {
+  if (!challenge) return undefined;
+  if (method !== 'S256') {
+    throw new OAuthError('invalid_request', 'code_challenge_method must be S256.');
+  }
+  return challenge;
+}
+
 function loginPage(options: {
   app: string;
   clientId: string;
   redirectUri: string;
   scope: string;
   state: string;
+  codeChallenge?: string;
   message?: string;
 }): string {
   const hidden = (name: string, value: string) =>
@@ -513,6 +544,7 @@ ${options.message ? `<p class="message">${escapeHtml(options.message)}</p>` : ''
   ${hidden('redirect_uri', options.redirectUri)}
   ${hidden('scope', options.scope)}
   ${hidden('state', options.state)}
+  ${options.codeChallenge ? hidden('code_challenge', options.codeChallenge) + hidden('code_challenge_method', 'S256') : ''}
   <label for="password">Password</label>
   <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
   <button type="submit">Authorise</button>

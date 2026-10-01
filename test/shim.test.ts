@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/shim/app.js';
 import {
@@ -368,6 +369,125 @@ describe('shim', () => {
 
       const location = new URL(response.headers.get('location') as string);
       expect(location.searchParams.get('state')).toBe('xyz123');
+    });
+
+    it('registers each URI of a newline-separated redirect_uris value', async () => {
+      const second = 'https://other.example/callback';
+      const response = await handle(
+        new Request('https://desk.example/api/v1/apps', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_name: 'Buffer', redirect_uris: `${REDIRECT}\n${second}\n` }),
+        }),
+      );
+      const { client_id: clientId } = (await response.json()) as { client_id: string };
+
+      for (const uri of [REDIRECT, second]) {
+        const authorize = await handle(
+          new Request(
+            `https://desk.example/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(uri)}&response_type=code`,
+          ),
+        );
+        expect(authorize.status).toBe(200);
+      }
+    });
+
+    it('accepts a redirect_uris array and reports client_secret_expires_at', async () => {
+      const second = 'https://other.example/callback';
+      const response = await handle(
+        new Request('https://desk.example/api/v1/apps', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ client_name: 'App', redirect_uris: [REDIRECT, second] }),
+        }),
+      );
+      const body = (await response.json()) as Record<string, unknown>;
+      expect(body.redirect_uris).toEqual([REDIRECT, second]);
+      expect(body.scopes).toEqual(['read']);
+      expect(body.client_secret_expires_at).toBe(0);
+    });
+
+    it('refuses client_credentials without the client secret', async () => {
+      const { clientId, clientSecret } = await registerApp();
+      const request = (secret: string) =>
+        handle(
+          new Request('https://desk.example/oauth/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type: 'client_credentials',
+              client_id: clientId,
+              client_secret: secret,
+            }),
+          }),
+        );
+      expect((await request('')).status).toBe(401);
+      expect((await request(clientSecret)).status).toBe(200);
+    });
+
+    describe('PKCE', () => {
+      const verifier = 'a-long-random-verifier-string-0123456789';
+      const challenge = createHash('sha256').update(verifier).digest('base64url');
+
+      async function authorizeWith(clientId: string, extra: Record<string, string>) {
+        const response = await handle(
+          new Request('https://desk.example/oauth/authorize', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: clientId,
+              redirect_uri: REDIRECT,
+              password: PASSWORD,
+              ...extra,
+            }),
+          }),
+        );
+        return response;
+      }
+
+      async function exchange(clientId: string, clientSecret: string, code: string, v?: string) {
+        const params: Record<string, string> = {
+          grant_type: 'authorization_code',
+          client_id: clientId,
+          client_secret: clientSecret,
+          code,
+          redirect_uri: REDIRECT,
+        };
+        if (v) params.code_verifier = v;
+        return handle(
+          new Request('https://desk.example/oauth/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams(params),
+          }),
+        );
+      }
+
+      it('redeems a code only with the matching verifier', async () => {
+        const { clientId, clientSecret } = await registerApp();
+        const pkce = { code_challenge: challenge, code_challenge_method: 'S256' };
+
+        const bad = await authorizeWith(clientId, pkce);
+        const badCode = new URL(bad.headers.get('location') as string).searchParams.get('code');
+        expect((await exchange(clientId, clientSecret, badCode as string, 'wrong')).status).toBe(400);
+
+        const good = await authorizeWith(clientId, pkce);
+        const goodCode = new URL(good.headers.get('location') as string).searchParams.get('code');
+        expect((await exchange(clientId, clientSecret, goodCode as string)).status).toBe(400);
+
+        const ok = await authorizeWith(clientId, pkce);
+        const okCode = new URL(ok.headers.get('location') as string).searchParams.get('code');
+        expect((await exchange(clientId, clientSecret, okCode as string, verifier)).status).toBe(200);
+      });
+
+      it('rejects a non-S256 challenge method', async () => {
+        const { clientId } = await registerApp();
+        const response = await authorizeWith(clientId, {
+          code_challenge: challenge,
+          code_challenge_method: 'plain',
+        });
+        expect(response.status).toBe(400);
+      });
     });
 
     it('shows the code on a page for out-of-band clients', async () => {
