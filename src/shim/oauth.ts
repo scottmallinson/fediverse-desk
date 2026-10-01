@@ -17,6 +17,8 @@ export interface AuthCode {
   clientId: string;
   redirectUri: string;
   scope: string;
+  /** PKCE S256 challenge, when the client supplied one. */
+  codeChallenge?: string;
   expiresAt: number;
 }
 
@@ -106,7 +108,7 @@ export class OAuthServer {
       redirectUris: input.redirectUris,
       clientId: secret(24),
       clientSecretHash: hash(clientSecret),
-      scopes: input.scopes ?? 'read write',
+      scopes: input.scopes?.trim() || 'read',
       createdAt: new Date(this.clock()).toISOString(),
     };
 
@@ -140,7 +142,12 @@ export class OAuthServer {
     return safeEqual(candidate, this.password);
   }
 
-  async issueCode(clientId: string, redirectUri: string, scope: string): Promise<string> {
+  async issueCode(
+    clientId: string,
+    redirectUri: string,
+    scope: string,
+    codeChallenge?: string,
+  ): Promise<string> {
     const code = secret();
     await this.store.update((state) => {
       state.codes = state.codes.filter((entry) => entry.expiresAt > this.clock());
@@ -149,6 +156,7 @@ export class OAuthServer {
         clientId,
         redirectUri,
         scope,
+        ...(codeChallenge ? { codeChallenge } : {}),
         expiresAt: this.clock() + 5 * 60_000,
       });
     });
@@ -161,11 +169,9 @@ export class OAuthServer {
     clientSecret: string;
     code: string;
     redirectUri: string;
+    codeVerifier?: string;
   }): Promise<{ accessToken: string; scope: string }> {
-    const app = await this.findApp(input.clientId);
-    if (!app || !safeEqual(hash(input.clientSecret), app.clientSecretHash)) {
-      throw new OAuthError('invalid_client', 'Client authentication failed.', 401);
-    }
+    const app = await this.authenticateClient(input.clientId, input.clientSecret);
 
     const codeHash = hash(input.code);
     const entry = await this.store.update((state) => {
@@ -184,7 +190,24 @@ export class OAuthServer {
       throw new OAuthError('invalid_grant', 'redirect_uri does not match the code.');
     }
 
+    if (entry.codeChallenge) {
+      const challenge = createHash('sha256')
+        .update(input.codeVerifier ?? '')
+        .digest('base64url');
+      if (!input.codeVerifier || !safeEqual(challenge, entry.codeChallenge)) {
+        throw new OAuthError('invalid_grant', 'code_verifier does not match the code_challenge.');
+      }
+    }
+
     return { accessToken: await this.issueToken(app.clientId, entry.scope), scope: entry.scope };
+  }
+
+  async authenticateClient(clientId: string, clientSecret: string): Promise<OAuthApp> {
+    const app = await this.findApp(clientId);
+    if (!app || !safeEqual(hash(clientSecret), app.clientSecretHash)) {
+      throw new OAuthError('invalid_client', 'Client authentication failed.', 401);
+    }
+    return app;
   }
 
   async issueToken(clientId: string, scope: string): Promise<string> {
