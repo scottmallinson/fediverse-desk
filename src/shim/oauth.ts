@@ -131,7 +131,12 @@ export class OAuthServer {
   async checkRedirect(clientId: string, redirectUri: string): Promise<OAuthApp> {
     const app = await this.findApp(clientId);
     if (!app) throw new OAuthError('invalid_client', 'Unknown client_id.', 401);
-    if (!app.redirectUris.includes(redirectUri)) {
+    // Apps registered before redirect_uris was split on whitespace hold several
+    // URIs in one entry. Clients such as Buffer register once and reuse the
+    // client_id for good, so split here too rather than strand them. Each URI
+    // is still compared exactly.
+    const registered = app.redirectUris.flatMap((uri) => uri.split(/\s+/)).filter(Boolean);
+    if (!registered.includes(redirectUri)) {
       throw new OAuthError('invalid_grant', 'redirect_uri does not match this client.');
     }
     return app;
