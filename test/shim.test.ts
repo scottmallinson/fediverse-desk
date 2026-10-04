@@ -409,6 +409,30 @@ describe('shim', () => {
       }
     });
 
+    it('still matches apps stored with several URIs in one entry by an older build', async () => {
+      const second = 'https://other.example/callback';
+      const { app } = await oauth.registerApp({
+        name: 'Buffer',
+        redirectUris: [`${REDIRECT}\n${second}`],
+      });
+
+      for (const uri of [REDIRECT, second]) {
+        const authorize = await handle(
+          new Request(
+            `https://desk.example/oauth/authorize?client_id=${app.clientId}&redirect_uri=${encodeURIComponent(uri)}&response_type=code`,
+          ),
+        );
+        expect(authorize.status).toBe(200);
+      }
+
+      const prefix = await handle(
+        new Request(
+          `https://desk.example/oauth/authorize?client_id=${app.clientId}&redirect_uri=${encodeURIComponent('https://other.example/')}&response_type=code`,
+        ),
+      );
+      expect(prefix.status).toBe(400);
+    });
+
     it('accepts a redirect_uris array and reports client_secret_expires_at', async () => {
       const second = 'https://other.example/callback';
       const response = await handle(
