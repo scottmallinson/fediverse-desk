@@ -145,6 +145,23 @@ describe('shim', () => {
       expect(body.registrations).toBe(false);
     });
 
+    it('serves the v2 shape on /api/v2/instance, with thumbnail as an object', async () => {
+      const response = await handle(new Request('https://desk.example/api/v2/instance'));
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as Record<string, any>;
+      expect(body.domain).toBe('desk.example');
+      expect(typeof body.thumbnail).toBe('object');
+      expect(typeof body.thumbnail.url).toBe('string');
+      expect(body.registrations).toEqual({
+        enabled: false,
+        approval_required: true,
+        message: null,
+      });
+      expect(body.configuration.statuses.max_characters).toBe(5000);
+      expect(body.configuration.urls).toBeDefined();
+    });
+
     it('points nodeinfo discovery at the 2.0 document', async () => {
       const response = await handle(new Request('https://desk.example/.well-known/nodeinfo'));
       expect(response.status).toBe(200);
