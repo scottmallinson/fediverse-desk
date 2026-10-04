@@ -307,6 +307,42 @@ export function toInstance(options: {
 }
 
 /**
+ * /api/v2/instance is a different document, not the v1 one at a new path.
+ * Clients that see a 4.x version ask for v2 first and parse it with a strict
+ * model: the Mastodon Android app, for one, rejects the whole server if
+ * `thumbnail` is a string rather than an object, and reports it as "doesn't
+ * appear to be a Mastodon server". So the shapes have to match Mastodon's.
+ */
+export function toInstanceV2(options: {
+  publicUrl: string;
+  account: MastodonAccount | null;
+  version: string;
+}): Record<string, unknown> {
+  const v1 = toInstance(options);
+  const host = new URL(options.publicUrl).host;
+  const configuration = v1.configuration as Record<string, unknown>;
+  return {
+    domain: host,
+    title: v1.title,
+    version: v1.version,
+    source_url: 'https://github.com/scottmallinson/fediverse-desk',
+    description: v1.description,
+    usage: { users: { active_month: 1 } },
+    thumbnail: { url: options.account?.avatar || '' },
+    languages: v1.languages,
+    configuration: {
+      urls: { streaming: '' },
+      accounts: { max_featured_tags: 0 },
+      ...configuration,
+      translation: { enabled: false },
+    },
+    registrations: { enabled: false, approval_required: true, message: null },
+    contact: { email: '', account: options.account },
+    rules: [],
+  };
+}
+
+/**
  * Instance detection happens before login, and it does not go through
  * /api/v1/instance: a client resolves /.well-known/nodeinfo first to find out
  * what software a domain runs, and only offers a Mastodon login if it likes the

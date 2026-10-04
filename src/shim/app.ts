@@ -11,6 +11,7 @@ import {
   encodeId,
   toAccount,
   toInstance,
+  toInstanceV2,
   toMedia,
   toNodeInfo,
   toNodeInfoLinks,
@@ -68,7 +69,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
 
   // --- instance metadata, unauthenticated -----------------------------------
 
-  const instanceHandler = async () => {
+  const instanceHandler = (render: typeof toInstance) => async () => {
     let account = null;
     try {
       account = await currentAccount();
@@ -76,11 +77,11 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       // An unreachable Ghost should not stop a client from discovering the
       // instance: it needs this response to know where to send its login.
     }
-    return json(toInstance({ publicUrl, account, version }));
+    return json(render({ publicUrl, account, version }));
   };
 
-  router.get('/api/v1/instance', instanceHandler);
-  router.get('/api/v2/instance', instanceHandler);
+  router.get('/api/v1/instance', instanceHandler(toInstance));
+  router.get('/api/v2/instance', instanceHandler(toInstanceV2));
   router.get('/api/v1/instance/peers', () => json([]));
   router.get('/api/v1/custom_emojis', () => json([]));
 
