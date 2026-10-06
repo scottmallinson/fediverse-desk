@@ -157,6 +157,10 @@ your bridge's domain as the server.
 | `GET`/`POST /oauth/authorize` | Password login, then a code. Supports the out-of-band redirect |
 | `POST /oauth/token`, `/oauth/revoke` | Authorization code and client credentials grants |
 | `GET /api/v1/accounts/verify_credentials` | The Ghost profile |
+| `GET /api/v1/accounts/:id`, `/accounts/lookup` | Any account Ghost can resolve by handle. Account ids are encoded `@user@host` handles |
+| `GET /api/v1/accounts/:id/statuses` | An account's posts. The publication's own come from its outbox. `pinned=true` is always empty |
+| `GET /api/v1/accounts/:id/{followers,following}`, `/accounts/relationships` | Follow lists and follow state |
+| `POST /api/v1/accounts/:id/{follow,unfollow}` | Follow and unfollow |
 | `POST /api/v1/statuses` | A note, or a reply when `in_reply_to_id` is set, or a queue entry when `scheduled_at` is |
 | `DELETE /api/v1/statuses/:id` | Delete |
 | `POST /api/v1/statuses/:id/{favourite,unfavourite,reblog,unreblog}` | Like and repost |
@@ -170,9 +174,10 @@ your bridge's domain as the server.
 - **One image per note.** Ghost's note API takes a single image. A status with
   two attachments is rejected with a 422 that says so, rather than silently
   dropping one.
-- **Ids are encoded ActivityPub URLs**, not snowflakes. Clients that sort by id
-  or page backwards through history will get it wrong. Posting works; being a
-  good timeline reader is not what this is for.
+- **Ids are encoded ActivityPub URLs** (statuses) and **encoded handles**
+  (accounts), not snowflakes. Clients that sort by id will get it wrong. Paging
+  forwards works whether a client follows the Link header or sends the last id
+  it saw, as long as the bridge served that page since it last restarted.
 - **`scheduled_at` is honoured by this app's own queue.** The status will not
   publish unless `desk run` is also running.
 - **No streaming, no polls, no visibility other than public**, because Ghost has
@@ -199,7 +204,7 @@ can do.
 ## Development
 
 ```bash
-npm test          # 110 tests
+npm test          # 131 tests
 npm run typecheck
 ```
 

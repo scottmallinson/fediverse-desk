@@ -205,13 +205,33 @@ export class GhstSocialWeb implements SocialWeb {
     return this.feed('notes', options);
   }
 
+  posts(handle: string, options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    return this.feed('posts', options, [handle]);
+  }
+
+  async follows(
+    handle: string,
+    type: 'followers' | 'following',
+    options: { limit?: number; next?: string } = {},
+  ): Promise<Page<Account>> {
+    const body = await this.run<{ accounts?: Account[]; next?: string | null }>([
+      'socialweb',
+      type,
+      handle,
+      ...paginationArgs(options),
+    ]);
+    return { items: body.accounts ?? [], next: body.next ?? null };
+  }
+
   private async feed(
     command: string,
     options: { limit?: number; next?: string },
+    extra: string[] = [],
   ): Promise<Page<Post>> {
     const body = await this.run<{ posts?: Post[]; next?: string | null }>([
       'socialweb',
       command,
+      ...extra,
       ...paginationArgs(options),
     ]);
     return { items: body.posts ?? [], next: body.next ?? null };

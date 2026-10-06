@@ -149,6 +149,23 @@ export class FakeSocialWeb implements SocialWeb {
     return { items: [makePost()], next: null };
   }
 
+  async posts(handle: string, options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    this.record('posts', handle, options);
+    return { items: [makePost()], next: options.next ? null : 'posts-cursor-2' };
+  }
+
+  async follows(
+    handle: string,
+    type: 'followers' | 'following',
+    options: { limit?: number; next?: string } = {},
+  ): Promise<Page<Account>> {
+    this.record('follows', handle, type, options);
+    return {
+      items: [makeAccount({ handle: '@alice@social.example', apId: 'https://social.example/users/alice' })],
+      next: null,
+    };
+  }
+
   async notifications(): Promise<Page<Notification>> {
     this.record('notifications');
     return {

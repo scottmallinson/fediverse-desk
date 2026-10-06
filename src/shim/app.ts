@@ -1,5 +1,5 @@
 import type { Queue } from '../scheduler/queue.js';
-import type { SocialWeb } from '../ghost/types.js';
+import type { Account, SocialWeb } from '../ghost/types.js';
 import {
   LoginThrottle,
   OAuthError,
@@ -7,9 +7,11 @@ import {
   OOB_REDIRECT,
 } from './oauth.js';
 import {
+  decodeAccountId,
   decodeId,
   encodeId,
   toAccount,
+  toRelationship,
   toInstance,
   toInstanceV2,
   toMedia,
@@ -65,6 +67,62 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
 
   async function currentAccount() {
     return toAccount(await social.me());
+  }
+
+  // The publication's own handle and ActivityPub id, learned once. Neither
+  // changes while the process runs, and asking Ghost on every profile request
+  // would double the calls behind each one.
+  let self: Promise<{ handle: string; apId: string }> | null = null;
+  function selfIdentity() {
+    self ??= social.me().then(
+      (account) => ({ handle: account.handle.toLowerCase(), apId: account.apId }),
+      (thrown) => {
+        self = null;
+        throw thrown;
+      },
+    );
+    return self;
+  }
+
+  /**
+   * The handle Ghost should be asked about for a Mastodon account id: "me" for
+   * the publication itself, whose posts come from its outbox rather than a
+   * webfinger round trip to its own domain. Null for an id this bridge did not
+   * issue, or one from an older build that cannot be turned into a handle.
+   */
+  async function accountHandle(id: string): Promise<string | null> {
+    const decoded = decodeAccountId(id);
+    if (!decoded) return null;
+    const own = await selfIdentity();
+    if ('apId' in decoded) return decoded.apId === own.apId ? 'me' : null;
+    return decoded.handle.toLowerCase() === own.handle ? 'me' : decoded.handle;
+  }
+
+  async function lookupAccount(handle: string): Promise<Account> {
+    return handle === 'me' ? social.me() : social.account(handle);
+  }
+
+  // Mastodon clients page with max_id in one of two ways: by following the Link
+  // header, which carries Ghost's own cursor, or by sending the id of the last
+  // item they were given, which Ghost has never heard of. The second is mapped
+  // back to the cursor that page ended on.
+  const cursors = new CursorMemory();
+
+  /** Ghost's cursor for a request, or "end" when there is no way to continue. */
+  function pageCursor(url: URL): { next?: string } | 'end' {
+    const maxId = url.searchParams.get('max_id');
+    if (!maxId) return {};
+    const remembered = cursors.get(maxId);
+    if (remembered) return { next: remembered };
+    // One of our own ids that was not the end of a page we served. Passing it to
+    // Ghost as a cursor would be an error, and there is nothing older to find.
+    return isIssuedId(maxId) ? 'end' : { next: maxId };
+  }
+
+  function rememberPage(ids: string[], next: string | null): void {
+    if (!next) return;
+    const last = ids[ids.length - 1];
+    if (last) cursors.set(last, next);
   }
 
   // --- instance metadata, unauthenticated -----------------------------------
@@ -293,10 +351,108 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     json({ name: 'fediverse-desk', website: null, vapid_key: '' }),
   );
 
-  router.get('/api/v1/accounts/:id', async ({ params }) => {
-    const account = await social.account(decodeId(params.id as string));
-    return json(toAccount(account));
+  // Fixed paths first: the router takes the first pattern that matches, and
+  // "relationships" and "lookup" would otherwise be read as account ids.
+  router.get('/api/v1/accounts/relationships', async ({ url }) => {
+    const ids = [...url.searchParams.getAll('id[]'), ...url.searchParams.getAll('id')];
+    const relationships = await Promise.all(
+      ids.map(async (id) => {
+        const handle = await accountHandle(id);
+        if (!handle || handle === 'me') return toRelationship(id, null);
+        const account = await social.account(handle).catch(() => null);
+        return toRelationship(id, account);
+      }),
+    );
+    return json(relationships);
   });
+
+  router.get('/api/v1/accounts/lookup', async ({ url }) => {
+    const acct = (url.searchParams.get('acct') ?? '').trim().replace(/^@/, '');
+    if (!acct) return error('acct is required', 400);
+    const own = await selfIdentity();
+    const ownHandle = own.handle.replace(/^@/, '');
+    const handle =
+      acct.toLowerCase() === ownHandle || acct.toLowerCase() === ownHandle.split('@')[0]
+        ? 'me'
+        : acct.includes('@')
+          ? `@${acct}`
+          : null;
+    if (!handle) return error('Record not found', 404);
+    return json(toAccount(await lookupAccount(handle)));
+  });
+
+  router.get('/api/v1/accounts/:id', async ({ params }) => {
+    const handle = await accountHandle(params.id as string);
+    if (!handle) return error('Record not found', 404);
+    return json(toAccount(await lookupAccount(handle)));
+  });
+
+  router.get('/api/v1/accounts/:id/statuses', async ({ params, url }) => {
+    const handle = await accountHandle(params.id as string);
+    if (!handle) return error('Record not found', 404);
+
+    // Ghost has no pinned posts, and asking for them is the first thing a
+    // profile screen does. An empty list is the honest answer.
+    const cursor = pageCursor(url);
+    if (url.searchParams.get('pinned') === 'true' || cursor === 'end') return json([]);
+
+    const page = await social.posts(handle, { limit: numberParam(url, 'limit', 20), ...cursor });
+    let posts = page.items;
+    if (url.searchParams.get('only_media') === 'true') {
+      posts = posts.filter((post) => (post.attachments ?? []).length > 0);
+    }
+    if (url.searchParams.get('exclude_reblogs') === 'true') {
+      posts = posts.filter((post) => !post.repostedBy);
+    }
+
+    const statuses = posts.map((post) => toStatus(post));
+    rememberPage(page.items.map((post) => encodeId(post.id)), page.next);
+    rememberPage(statuses.map((status) => status.id), page.next);
+    return json(statuses, linkHeader(url, page.next));
+  });
+
+  const followsHandler =
+    (type: 'followers' | 'following') =>
+    async ({ params, url }: RouteContext) => {
+      const handle = await accountHandle(params.id as string);
+      if (!handle) return error('Record not found', 404);
+      const cursor = pageCursor(url);
+      if (cursor === 'end') return json([]);
+
+      const page = await social.follows(handle, type, {
+        limit: numberParam(url, 'limit', 40),
+        ...cursor,
+      });
+      const accounts = page.items.map(toAccount);
+      rememberPage(
+        accounts.map((account) => account.id),
+        page.next,
+      );
+      return json(accounts, linkHeader(url, page.next));
+    };
+
+  router.get('/api/v1/accounts/:id/followers', followsHandler('followers'));
+  router.get('/api/v1/accounts/:id/following', followsHandler('following'));
+
+  const followAction = (action: 'follow' | 'unfollow') => async ({ params }: RouteContext) => {
+    const handle = await accountHandle(params.id as string);
+    if (!handle) return error('Record not found', 404);
+    if (handle === 'me') return error('The publication cannot follow itself.', 422);
+    await social[action](handle);
+    const account = await social.account(handle).catch(() => null);
+    const relationship = toRelationship(params.id as string, account);
+    // Ghost may not have recorded the change by the time it is read back.
+    return json({ ...relationship, following: action === 'follow' });
+  };
+
+  router.post('/api/v1/accounts/:id/follow', followAction('follow'));
+  router.post('/api/v1/accounts/:id/unfollow', followAction('unfollow'));
+
+  // Profile screens ask for these alongside the account. Ghost has none of them.
+  router.get('/api/v1/accounts/:id/featured_tags', () => json([]));
+  router.get('/api/v1/accounts/:id/lists', () => json([]));
+  router.get('/api/v1/accounts/:id/identity_proofs', () => json([]));
+  router.get('/api/v1/featured_tags', () => json([]));
 
   // --- statuses -------------------------------------------------------------
 
@@ -397,11 +553,15 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   // --- timelines and notifications -----------------------------------------
 
   router.get('/api/v1/timelines/home', async ({ url }) => {
-    const page = await social.readerFeed({
-      limit: numberParam(url, 'limit', 20),
-      ...(url.searchParams.get('max_id') ? { next: url.searchParams.get('max_id') as string } : {}),
-    });
-    return json(page.items.map((post) => toStatus(post)), linkHeader(url, page.next));
+    const cursor = pageCursor(url);
+    if (cursor === 'end') return json([]);
+    const page = await social.readerFeed({ limit: numberParam(url, 'limit', 20), ...cursor });
+    const statuses = page.items.map((post) => toStatus(post));
+    rememberPage(
+      statuses.map((status) => status.id),
+      page.next,
+    );
+    return json(statuses, linkHeader(url, page.next));
   });
 
   router.get('/api/v1/timelines/public', async ({ url }) => {
@@ -483,6 +643,36 @@ function linkHeader(url: URL, next: string | null): ResponseInit {
   const target = new URL(url.toString());
   target.searchParams.set('max_id', next);
   return { headers: { Link: `<${target.toString()}>; rel="next"` } };
+}
+
+/** A status or account id this bridge handed out, as opposed to a Ghost cursor. */
+function isIssuedId(value: string): boolean {
+  try {
+    decodeId(value);
+    return true;
+  } catch {
+    return decodeAccountId(value) !== null;
+  }
+}
+
+/** Last-item ids mapped to the cursor of the page that follows. Bounded. */
+class CursorMemory {
+  private readonly entries = new Map<string, string>();
+
+  constructor(private readonly limit = 1000) {}
+
+  get(id: string): string | undefined {
+    return this.entries.get(id);
+  }
+
+  set(id: string, cursor: string): void {
+    this.entries.delete(id);
+    this.entries.set(id, cursor);
+    if (this.entries.size > this.limit) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest !== undefined) this.entries.delete(oldest);
+    }
+  }
 }
 
 function escapeHtml(value: string): string {

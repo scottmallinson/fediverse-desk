@@ -114,6 +114,32 @@ describe('DirectSocialWeb', () => {
     await client.me();
     expect(seen[0]?.url).toBe('https://example.com/.ghost/activitypub/v1/account/me');
   });
+
+  it('reads an account\'s posts and follows by handle', async () => {
+    const { client, seen } = directClient((record) =>
+      new Response(
+        JSON.stringify(
+          record.url.includes('/follows/')
+            ? { accounts: [makeAccount()], next: null }
+            : { posts: [makePost()], next: '2026-08-18T10:00:00.000Z' },
+        ),
+      ),
+    );
+
+    const posts = await client.posts('@alice@social.example', { limit: 5 });
+    await client.posts('me');
+    const follows = await client.follows('me', 'followers');
+
+    expect(seen[0]?.url).toBe(
+      'https://example.com/.ghost/activitypub/v1/posts/%40alice%40social.example?limit=5',
+    );
+    expect(seen[1]?.url).toBe('https://example.com/.ghost/activitypub/v1/posts/me');
+    expect(seen[2]?.url).toBe(
+      'https://example.com/.ghost/activitypub/v1/account/me/follows/followers',
+    );
+    expect(posts.next).toBe('2026-08-18T10:00:00.000Z');
+    expect(follows.items).toHaveLength(1);
+  });
 });
 
 function ghstClient(respond: (args: string[]) => { stdout: string; code?: number }): {

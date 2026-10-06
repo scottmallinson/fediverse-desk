@@ -21,6 +21,33 @@ export function decodeId(id: string): string {
   return decoded;
 }
 
+/**
+ * Account ids are encoded handles rather than ActivityPub URLs, because a handle
+ * is the only thing Ghost's account and posts endpoints accept. A post's author
+ * does not reliably carry its ActivityPub URL either: for some feed rows its id
+ * is Ghost's internal row number, which would decode to nothing usable.
+ */
+export function encodeAccountId(handle: string): string {
+  return Buffer.from(normaliseHandle(handle), 'utf8').toString('base64url');
+}
+
+/**
+ * The "@user@host" handle an account id stands for, or the ActivityPub URL that
+ * builds before handle ids issued instead. Null for anything else.
+ */
+export function decodeAccountId(id: string): { handle: string } | { apId: string } | null {
+  const decoded = Buffer.from(id, 'base64url').toString('utf8');
+  if (HANDLE.test(decoded)) return { handle: decoded };
+  if (/^https?:\/\//.test(decoded)) return { apId: decoded };
+  return null;
+}
+
+const HANDLE = /^@[^@\s/]+@[^@\s/]+$/;
+
+function normaliseHandle(handle: string): string {
+  return `@${handle.replace(/^@/, '')}`;
+}
+
 export interface MastodonAccount {
   id: string;
   username: string;
@@ -54,7 +81,7 @@ export function toAccount(account: Account): MastodonAccount {
   const header = account.bannerImageUrl ?? BLANK_IMAGE;
 
   return {
-    id: encodeId(account.apId || account.id),
+    id: encodeAccountId(handle),
     username,
     acct: handle,
     display_name: account.name ?? '',
@@ -90,7 +117,7 @@ export function toAccount(account: Account): MastodonAccount {
 function authorToAccount(author: Post['author']): MastodonAccount {
   const handle = author.handle.replace(/^@/, '');
   return {
-    id: encodeId(author.id),
+    id: encodeAccountId(handle),
     username: handle.split('@')[0] ?? handle,
     acct: handle,
     display_name: author.name ?? '',
@@ -111,6 +138,27 @@ function authorToAccount(author: Post['author']): MastodonAccount {
     last_status_at: null,
     emojis: [],
     fields: [],
+  };
+}
+
+/** Mastodon's Relationship entity, from what Ghost says about one account. */
+export function toRelationship(id: string, account: Account | null): Record<string, unknown> {
+  return {
+    id,
+    following: account?.followedByMe ?? false,
+    showing_reblogs: true,
+    notifying: false,
+    languages: null,
+    followed_by: account?.followsMe ?? false,
+    blocking: account?.blockedByMe ?? false,
+    blocked_by: false,
+    muting: false,
+    muting_notifications: false,
+    requested: false,
+    requested_by: false,
+    domain_blocking: account?.domainBlockedByMe ?? false,
+    endorsed: false,
+    note: '',
   };
 }
 

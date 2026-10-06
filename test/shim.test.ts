@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/shim/app.js';
 import {
+  decodeAccountId,
   decodeId,
+  encodeAccountId,
   encodeId,
   parseWebfingerResource,
   toStatus,
@@ -919,6 +921,152 @@ describe('shim', () => {
         expect(response.status, path).toBe(200);
         expect(await response.json(), path).toEqual([]);
       }
+    });
+  });
+
+  describe('profiles', () => {
+    async function ownId(token: string): Promise<string> {
+      const response = await handle(authed('/api/v1/accounts/verify_credentials', token));
+      return ((await response.json()) as { id: string }).id;
+    }
+
+    it('gives an account the same id in verify_credentials and on its posts', async () => {
+      const token = await login();
+      const id = await ownId(token);
+      const home = await handle(authed('/api/v1/timelines/home', token));
+      const [status] = (await home.json()) as Array<{ account: { id: string } }>;
+      expect(status?.account.id).toBe(id);
+      expect(decodeAccountId(id)).toEqual({ handle: '@scott@example.com' });
+    });
+
+    it('serves the publication itself from Ghost\'s "me" account', async () => {
+      const token = await login();
+      const response = await handle(authed(`/api/v1/accounts/${await ownId(token)}`, token));
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { acct: string }).acct).toBe('scott@example.com');
+      expect(social.calls.filter((call) => call.method === 'account')).toEqual([]);
+    });
+
+    it('lists the publication\'s own posts from its outbox', async () => {
+      const token = await login();
+      const response = await handle(
+        authed(`/api/v1/accounts/${await ownId(token)}/statuses?limit=5`, token),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Array<{ content: string }>;
+      expect(body[0]?.content).toBe('Hello fediverse');
+      expect(social.calls.find((call) => call.method === 'posts')?.args).toEqual([
+        'me',
+        { limit: 5 },
+      ]);
+      expect(response.headers.get('link')).toContain('max_id=posts-cursor-2');
+    });
+
+    it('asks Ghost about another account by its handle', async () => {
+      const token = await login();
+      const id = encodeAccountId('@murat@muratcorlu.com');
+
+      const account = await handle(authed(`/api/v1/accounts/${id}`, token));
+      expect(account.status).toBe(200);
+      expect(social.calls.find((call) => call.method === 'account')?.args).toEqual([
+        '@murat@muratcorlu.com',
+      ]);
+
+      const statuses = await handle(authed(`/api/v1/accounts/${id}/statuses`, token));
+      expect(statuses.status).toBe(200);
+      expect(social.calls.find((call) => call.method === 'posts')?.args[0]).toBe(
+        '@murat@muratcorlu.com',
+      );
+    });
+
+    it('pages on from the id of the last status, not only from the Link header', async () => {
+      const token = await login();
+      const id = await ownId(token);
+      const first = await handle(authed(`/api/v1/accounts/${id}/statuses`, token));
+      const [last] = (await first.json()) as Array<{ id: string }>;
+
+      const second = await handle(
+        authed(`/api/v1/accounts/${id}/statuses?max_id=${last?.id}`, token),
+      );
+      expect(second.status).toBe(200);
+      const calls = social.calls.filter((call) => call.method === 'posts');
+      expect(calls[1]?.args[1]).toMatchObject({ next: 'posts-cursor-2' });
+    });
+
+    it('ends the list rather than send Ghost a status id it cannot page from', async () => {
+      const token = await login();
+      const maxId = encodeId('https://example.com/.ghost/activitypub/note/99');
+      const response = await handle(
+        authed(`/api/v1/accounts/${await ownId(token)}/statuses?max_id=${maxId}`, token),
+      );
+      expect(await response.json()).toEqual([]);
+      expect(social.calls.some((call) => call.method === 'posts')).toBe(false);
+    });
+
+    it('answers pinned with an empty list, because Ghost has no pins', async () => {
+      const token = await login();
+      const response = await handle(
+        authed(`/api/v1/accounts/${await ownId(token)}/statuses?pinned=true`, token),
+      );
+      expect(await response.json()).toEqual([]);
+    });
+
+    it('still resolves the publication from an id an older build issued', async () => {
+      const token = await login();
+      const legacy = encodeId('https://example.com/.ghost/activitypub/users/index');
+      const response = await handle(authed(`/api/v1/accounts/${legacy}/statuses`, token));
+      expect(response.status).toBe(200);
+    });
+
+    it('404s an id it cannot turn into a handle', async () => {
+      const token = await login();
+      const response = await handle(authed('/api/v1/accounts/MTIz', token));
+      expect(response.status).toBe(404);
+    });
+
+    it('reports relationships from what Ghost says about each account', async () => {
+      const token = await login();
+      const id = encodeAccountId('@alice@social.example');
+      const response = await handle(
+        authed(`/api/v1/accounts/relationships?id[]=${id}`, token),
+      );
+      expect(response.status).toBe(200);
+      const [relationship] = (await response.json()) as Array<Record<string, unknown>>;
+      expect(relationship).toMatchObject({ id, following: false, blocking: false });
+    });
+
+    it('lists followers and following', async () => {
+      const token = await login();
+      const id = await ownId(token);
+      for (const type of ['followers', 'following']) {
+        const response = await handle(authed(`/api/v1/accounts/${id}/${type}`, token));
+        expect(response.status, type).toBe(200);
+        const [account] = (await response.json()) as Array<{ acct: string }>;
+        expect(account?.acct).toBe('alice@social.example');
+      }
+    });
+
+    it('follows by handle', async () => {
+      const token = await login();
+      const id = encodeAccountId('@alice@social.example');
+      const response = await handle(
+        authed(`/api/v1/accounts/${id}/follow`, token, { method: 'POST' }),
+      );
+      expect(((await response.json()) as { following: boolean }).following).toBe(true);
+      expect(social.calls.find((call) => call.method === 'follow')?.args).toEqual([
+        '@alice@social.example',
+      ]);
+    });
+
+    it('looks an account up by acct', async () => {
+      const token = await login();
+      const response = await handle(
+        authed('/api/v1/accounts/lookup?acct=alice@social.example', token),
+      );
+      expect(response.status).toBe(200);
+      expect(social.calls.find((call) => call.method === 'account')?.args).toEqual([
+        '@alice@social.example',
+      ]);
     });
   });
 
