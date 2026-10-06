@@ -11,6 +11,7 @@ import {
 } from '../src/shim/mastodon.js';
 import { LoginThrottle, OAuthServer, OOB_REDIRECT } from '../src/shim/oauth.js';
 import { Queue } from '../src/scheduler/queue.js';
+import type { Post } from '../src/ghost/types.js';
 import { FakeSocialWeb, makePost, tempDir } from './helpers.js';
 
 const REDIRECT = 'https://client.example/callback';
@@ -1001,6 +1002,45 @@ describe('shim', () => {
       );
       expect(await response.json()).toEqual([]);
       expect(social.calls.some((call) => call.method === 'posts')).toBe(false);
+    });
+
+    it('maps another server\'s posts in the raw shape Ghost passes through', async () => {
+      const token = await login();
+      // As Ghost relays a remote outbox: compacted JSON-LD, so a lone attachment
+      // is an object rather than a list, url can be a Link, mediaType can be absent.
+      const remote = {
+        ...makePost({
+          id: 'https://mastodon.social/users/adactio/statuses/1',
+          author: {
+            id: 'https://mastodon.social/users/adactio',
+            name: 'Jeremy Keith',
+            handle: '@adactio@mastodon.social',
+            avatarUrl: '',
+            url: 'https://mastodon.social/users/adactio',
+            followedByMe: true,
+          },
+        }),
+        url: [{ type: 'Link', href: 'https://mastodon.social/@adactio/1' }],
+        attachments: { type: 'Document', url: 'https://files.example/a.mp4', name: null },
+      } as unknown as Post;
+      const broken = { id: 42, author: null } as unknown as Post;
+      social.postsPage = { items: [remote, broken, makePost()], next: null };
+
+      const id = encodeAccountId('@adactio@mastodon.social');
+      const response = await handle(authed(`/api/v1/accounts/${id}/statuses`, token));
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as Array<{
+        url: string;
+        media_attachments: Array<{ url: string; type: string }>;
+        account: { id: string };
+      }>;
+      expect(body).toHaveLength(2);
+      expect(body[0]?.url).toBe('https://mastodon.social/@adactio/1');
+      expect(body[0]?.media_attachments).toEqual([
+        expect.objectContaining({ url: 'https://files.example/a.mp4', type: 'unknown' }),
+      ]);
+      expect(body[0]?.account.id).toBe(id);
     });
 
     it('answers pinned with an empty list, because Ghost has no pins', async () => {

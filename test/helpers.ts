@@ -76,6 +76,8 @@ export class FakeSocialWeb implements SocialWeb {
   readonly calls: FakeCall[] = [];
   failNext: Error | null = null;
   notes: Post[] = [];
+  /** What posts() returns, when a test needs something other than one tidy post. */
+  postsPage: Page<Post> | null = null;
 
   private record(method: string, ...args: unknown[]): void {
     this.calls.push({ method, args });
@@ -151,6 +153,7 @@ export class FakeSocialWeb implements SocialWeb {
 
   async posts(handle: string, options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
     this.record('posts', handle, options);
+    if (this.postsPage) return this.postsPage;
     return { items: [makePost()], next: options.next ? null : 'posts-cursor-2' };
   }
 

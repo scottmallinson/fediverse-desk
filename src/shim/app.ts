@@ -397,18 +397,36 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     if (url.searchParams.get('pinned') === 'true' || cursor === 'end') return json([]);
 
     const page = await social.posts(handle, { limit: numberParam(url, 'limit', 20), ...cursor });
-    let posts = page.items;
+
+    // Another server's posts come through Ghost close to raw, so one that cannot
+    // be mapped is skipped rather than allowed to fail the whole profile.
+    const mapped = page.items.flatMap((post) => {
+      try {
+        return [{ post, status: toStatus(post) }];
+      } catch {
+        return [];
+      }
+    });
+    rememberPage(
+      mapped.map(({ status }) => status.id),
+      page.next,
+    );
+
+    let statuses = mapped;
     if (url.searchParams.get('only_media') === 'true') {
-      posts = posts.filter((post) => (post.attachments ?? []).length > 0);
+      statuses = statuses.filter(({ status }) => status.media_attachments.length > 0);
     }
     if (url.searchParams.get('exclude_reblogs') === 'true') {
-      posts = posts.filter((post) => !post.repostedBy);
+      statuses = statuses.filter(({ post }) => !post.repostedBy);
     }
-
-    const statuses = posts.map((post) => toStatus(post));
-    rememberPage(page.items.map((post) => encodeId(post.id)), page.next);
-    rememberPage(statuses.map((status) => status.id), page.next);
-    return json(statuses, linkHeader(url, page.next));
+    rememberPage(
+      statuses.map(({ status }) => status.id),
+      page.next,
+    );
+    return json(
+      statuses.map(({ status }) => status),
+      linkHeader(url, page.next),
+    );
   });
 
   const followsHandler =
