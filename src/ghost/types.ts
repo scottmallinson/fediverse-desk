@@ -59,7 +59,9 @@ export interface Account {
   followingCount: number;
   followerCount: number;
   followedByMe?: boolean;
+  followsMe?: boolean;
   blockedByMe?: boolean;
+  domainBlockedByMe?: boolean;
 }
 
 export interface Notification {
@@ -116,6 +118,13 @@ export interface SocialWeb {
   unfollow(handle: string): Promise<void>;
   readerFeed(options?: { limit?: number; next?: string }): Promise<Page<Post>>;
   notesFeed(options?: { limit?: number; next?: string }): Promise<Page<Post>>;
+  /** One account's own posts. "me" is the publication's handle. */
+  posts(handle: string, options?: { limit?: number; next?: string }): Promise<Page<Post>>;
+  follows(
+    handle: string,
+    type: 'followers' | 'following',
+    options?: { limit?: number; next?: string },
+  ): Promise<Page<Account>>;
   notifications(options?: { limit?: number; next?: string }): Promise<Page<Notification>>;
   uploadImage(file: Uint8Array, filename: string, mimeType: string): Promise<string>;
   search(query: string): Promise<{ accounts: Account[] }>;

@@ -84,7 +84,7 @@ export class DirectSocialWeb implements SocialWeb {
   }
 
   account(handle: string): Promise<Account> {
-    return this.request<Account>('GET', `v1/account/${encodeURIComponent(handle)}`);
+    return this.request<Account>('GET', `v1/account/${encodeHandle(handle)}`);
   }
 
   async note(input: NoteInput): Promise<Post> {
@@ -161,6 +161,23 @@ export class DirectSocialWeb implements SocialWeb {
     return this.feed('v1/feed/notes', options);
   }
 
+  posts(handle: string, options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    return this.feed(`v1/posts/${encodeHandle(handle)}`, options);
+  }
+
+  async follows(
+    handle: string,
+    type: 'followers' | 'following',
+    options: { limit?: number; next?: string } = {},
+  ): Promise<Page<Account>> {
+    const body = await this.request<{ accounts?: Account[]; next?: string | null }>(
+      'GET',
+      `v1/account/${encodeHandle(handle)}/follows/${type}`,
+      { query: { limit: options.limit, next: options.next } },
+    );
+    return { items: body.accounts ?? [], next: body.next ?? null };
+  }
+
   private async feed(
     path: string,
     options: { limit?: number; next?: string },
@@ -194,6 +211,11 @@ export class DirectSocialWeb implements SocialWeb {
   search(query: string): Promise<{ accounts: Account[] }> {
     return this.request('GET', 'v1/actions/search', { query: { query } });
   }
+}
+
+/** Ghost takes "me" or an "@user@host" handle in these path segments. */
+function encodeHandle(handle: string): string {
+  return handle === 'me' ? 'me' : encodeURIComponent(handle);
 }
 
 function toNoteBody(input: NoteInput): Record<string, unknown> {
