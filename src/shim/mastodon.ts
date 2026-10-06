@@ -115,7 +115,7 @@ export function toAccount(account: Account): MastodonAccount {
  * every client treats a missing number as a crash and a zero as "not shown".
  */
 function authorToAccount(author: Post['author']): MastodonAccount {
-  const handle = author.handle.replace(/^@/, '');
+  const handle = (author.handle ?? '').replace(/^@/, '');
   return {
     id: encodeAccountId(handle),
     username: handle.split('@')[0] ?? handle,
@@ -127,9 +127,9 @@ function authorToAccount(author: Post['author']): MastodonAccount {
     group: false,
     created_at: new Date(0).toISOString(),
     note: '',
-    url: author.url ?? '',
-    avatar: author.avatarUrl ?? BLANK_IMAGE,
-    avatar_static: author.avatarUrl ?? BLANK_IMAGE,
+    url: linkHref(author.url) ?? '',
+    avatar: author.avatarUrl || BLANK_IMAGE,
+    avatar_static: author.avatarUrl || BLANK_IMAGE,
     header: BLANK_IMAGE,
     header_static: BLANK_IMAGE,
     followers_count: 0,
@@ -188,10 +188,49 @@ export function toMedia(url: string, description?: string | null): MastodonMedia
   };
 }
 
-function attachmentToMedia(attachment: Attachment): MastodonMedia {
-  const media = toMedia(attachment.url, attachment.name || null);
-  if (!attachment.mediaType.startsWith('image/')) media.type = 'unknown';
+/**
+ * Posts from another server's outbox reach us as that server's ActivityPub JSON,
+ * passed through by Ghost with little normalisation. Compacted JSON-LD collapses
+ * a one-item list to the item itself, a url can be a Link object or a list of
+ * them, and mediaType is optional. Any of those used to throw, and one bad post
+ * took the whole profile down with it.
+ */
+function attachmentsOf(post: Post): MastodonMedia[] {
+  const media: MastodonMedia[] = [];
+  for (const attachment of asArray<Partial<Attachment> | string>(post.attachments)) {
+    const item = typeof attachment === 'string' ? { url: attachment } : attachment;
+    const url = linkHref(item?.url);
+    if (!url) continue;
+    const entry = toMedia(url, typeof item.name === 'string' && item.name ? item.name : null);
+    const mediaType = typeof item.mediaType === 'string' ? item.mediaType : '';
+    if (mediaType ? !mediaType.startsWith('image/') : item.type !== 'Image') {
+      entry.type = 'unknown';
+    }
+    media.push(entry);
+  }
   return media;
+}
+
+function asArray<T>(value: T | T[] | null | undefined): T[] {
+  if (value === null || value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+/** The first usable URL from a string, a Link object, or a list of either. */
+function linkHref(value: unknown): string | null {
+  for (const candidate of asArray(value as unknown)) {
+    if (typeof candidate === 'string' && candidate) return candidate;
+    if (candidate && typeof candidate === 'object') {
+      const href = (candidate as { href?: unknown }).href ?? (candidate as { url?: unknown }).url;
+      if (typeof href === 'string' && href) return href;
+    }
+  }
+  return null;
+}
+
+function isoDate(value: unknown): string {
+  const date = new Date(typeof value === 'string' || typeof value === 'number' ? value : Date.now());
+  return Number.isNaN(date.getTime()) ? new Date(0).toISOString() : date.toISOString();
 }
 
 export interface MastodonStatus {
@@ -227,19 +266,21 @@ export interface MastodonStatus {
 }
 
 export function toStatus(post: Post, options: { inReplyTo?: string | null } = {}): MastodonStatus {
-  const content = post.content || post.excerpt || post.title || '';
+  const content = [post.content, post.excerpt, post.title].find(
+    (value): value is string => typeof value === 'string' && value.length > 0,
+  ) ?? '';
 
   return {
     id: encodeId(post.id),
     uri: post.id,
-    url: post.url || post.id,
-    created_at: new Date(post.publishedAt ?? Date.now()).toISOString(),
+    url: linkHref(post.url) ?? post.id,
+    created_at: isoDate(post.publishedAt),
     account: authorToAccount(post.author),
     content,
     visibility: 'public',
     sensitive: false,
     spoiler_text: '',
-    media_attachments: (post.attachments ?? []).map(attachmentToMedia),
+    media_attachments: attachmentsOf(post),
     mentions: [],
     tags: [],
     emojis: [],
@@ -275,7 +316,7 @@ export function toNotification(notification: Notification): Record<string, unkno
   return {
     id: notification.id,
     type: NOTIFICATION_TYPES[notification.type] ?? 'mention',
-    created_at: new Date(notification.createdAt ?? Date.now()).toISOString(),
+    created_at: isoDate(notification.createdAt),
     account: authorToAccount(notification.actor),
     status: post
       ? {

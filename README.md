@@ -204,7 +204,7 @@ can do.
 ## Development
 
 ```bash
-npm test          # 131 tests
+npm test          # 132 tests
 npm run typecheck
 ```
 
