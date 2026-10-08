@@ -1,4 +1,4 @@
-import type { Account, Attachment, Notification, Post } from '../ghost/types.js';
+import type { Account, Attachment, Notification, Post, Thread } from '../ghost/types.js';
 
 /**
  * Ghost identifies posts and accounts by their ActivityPub URL. Mastodon ids are
@@ -74,7 +74,15 @@ export interface MastodonAccount {
 
 const BLANK_IMAGE = '';
 
-export function toAccount(account: Account): MastodonAccount {
+/**
+ * Ghost has no creation date for an account. `createdAt` is the one found
+ * elsewhere, when there is one; without it the epoch stands in, because every
+ * client requires the field.
+ */
+export function toAccount(
+  account: Account,
+  options: { createdAt?: string | null } = {},
+): MastodonAccount {
   const handle = account.handle.replace(/^@/, '');
   const username = handle.split('@')[0] ?? handle;
   const avatar = account.avatarUrl ?? BLANK_IMAGE;
@@ -89,7 +97,7 @@ export function toAccount(account: Account): MastodonAccount {
     bot: false,
     discoverable: true,
     group: false,
-    created_at: new Date(0).toISOString(),
+    created_at: options.createdAt ?? new Date(0).toISOString(),
     note: account.bio ?? '',
     url: account.url ?? '',
     avatar,
@@ -301,6 +309,39 @@ export function toStatus(post: Post, options: { inReplyTo?: string | null } = {}
     card: null,
     poll: null,
   };
+}
+
+/**
+ * Mastodon's Context entity. Clients rebuild the tree from in_reply_to_id, so
+ * each post is given the id of the one it answers, which Ghost conveys only by
+ * where it sits in the thread. Deleted posts come back as tombstones with
+ * nothing to show, and are left out.
+ */
+export function toContext(thread: Thread): {
+  ancestors: MastodonStatus[];
+  descendants: MastodonStatus[];
+} {
+  const ancestors: MastodonStatus[] = [];
+  let parent: string | null = null;
+  for (const post of thread.ancestors?.chain ?? []) {
+    if (!isTombstone(post)) ancestors.push(toStatus(post, { inReplyTo: parent }));
+    parent = post.id;
+  }
+
+  const descendants: MastodonStatus[] = [];
+  for (const child of thread.children ?? []) {
+    let above = thread.post?.id ?? null;
+    for (const post of [child.post, ...(child.chain ?? [])]) {
+      if (!isTombstone(post)) descendants.push(toStatus(post, { inReplyTo: above }));
+      above = post.id;
+    }
+  }
+
+  return { ancestors, descendants };
+}
+
+function isTombstone(post: Post): boolean {
+  return post.type === 2 || post.type === 'tombstone';
 }
 
 const NOTIFICATION_TYPES = {

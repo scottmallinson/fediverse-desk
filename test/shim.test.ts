@@ -10,9 +10,10 @@ import {
   toStatus,
 } from '../src/shim/mastodon.js';
 import { LoginThrottle, OAuthServer, OOB_REDIRECT } from '../src/shim/oauth.js';
+import { SocialWebError } from '../src/ghost/direct.js';
 import { Queue } from '../src/scheduler/queue.js';
 import type { Post } from '../src/ghost/types.js';
-import { FakeSocialWeb, makePost, tempDir } from './helpers.js';
+import { FakeSocialWeb, makeAccount, makePost, tempDir } from './helpers.js';
 
 const REDIRECT = 'https://client.example/callback';
 const PASSWORD = 'correct-horse-battery-staple';
@@ -57,10 +58,15 @@ describe('shim', () => {
   let social: FakeSocialWeb;
   let oauth: OAuthServer;
   let handle: (request: Request) => Promise<Response>;
+  let fetched: string[];
+  /** Join dates other servers report, by the URL the shim asks. */
+  let joinDates: Map<string, string>;
 
   beforeEach(async () => {
     dir = await tempDir();
     social = new FakeSocialWeb();
+    fetched = [];
+    joinDates = new Map();
     oauth = OAuthServer.open(dir.path, PASSWORD);
     handle = createApp({
       social,
@@ -70,6 +76,14 @@ describe('shim', () => {
       version: 'test',
       ghostUrl: 'https://example.com',
       throttle: new LoginThrottle(3, 60_000),
+      fetcher: async (input) => {
+        const url = String(input);
+        fetched.push(url);
+        const createdAt = joinDates.get(url);
+        return createdAt
+          ? Response.json({ created_at: createdAt })
+          : new Response('Not found', { status: 404 });
+      },
     });
   });
 
@@ -1098,6 +1112,80 @@ describe('shim', () => {
       ]);
     });
 
+    it('fills a post author with the full account, so its profile has counts', async () => {
+      const token = await login();
+      social.postsPage = {
+        items: [
+          makePost({
+            id: 'https://mastodon.social/users/smallseasons/statuses/1',
+            author: {
+              id: 'https://mastodon.social/users/smallseasons',
+              name: 'Small Seasons Bot',
+              handle: '@smallseasons@mastodon.social',
+              avatarUrl: '',
+              url: 'https://mastodon.social/@smallseasons',
+              followedByMe: true,
+            },
+          }),
+        ],
+        next: null,
+      };
+      social.accounts.set(
+        '@smallseasons@mastodon.social',
+        makeAccount({
+          handle: '@smallseasons@mastodon.social',
+          followerCount: 106,
+          followingCount: 1,
+          postCount: 250,
+        }),
+      );
+      joinDates.set(
+        'https://mastodon.social/api/v1/accounts/lookup?acct=smallseasons',
+        '2024-11-12T00:00:00.000Z',
+      );
+
+      const id = encodeAccountId('@smallseasons@mastodon.social');
+      const response = await handle(authed(`/api/v1/accounts/${id}/statuses`, token));
+      const [status] = (await response.json()) as Array<{ account: Record<string, unknown> }>;
+      expect(status?.account).toMatchObject({
+        id,
+        followers_count: 106,
+        following_count: 1,
+        statuses_count: 250,
+        created_at: '2024-11-12T00:00:00.000Z',
+      });
+    });
+
+    it('asks an account\'s own server when it joined', async () => {
+      const token = await login();
+      joinDates.set(
+        'https://social.example/api/v1/accounts/lookup?acct=alice',
+        '2022-10-30T00:00:00.000Z',
+      );
+      const id = encodeAccountId('@alice@social.example');
+      const response = await handle(authed(`/api/v1/accounts/${id}`, token));
+      expect(((await response.json()) as { created_at: string }).created_at).toBe(
+        '2022-10-30T00:00:00.000Z',
+      );
+    });
+
+    it('falls back to the epoch when no join date can be found', async () => {
+      const token = await login();
+      const id = encodeAccountId('@alice@social.example');
+      const response = await handle(authed(`/api/v1/accounts/${id}`, token));
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { created_at: string }).created_at).toBe(
+        new Date(0).toISOString(),
+      );
+    });
+
+    it('does not ask the publication\'s own site for a Mastodon API it lacks', async () => {
+      const token = await login();
+      await handle(authed(`/api/v1/accounts/${await ownId(token)}`, token));
+      await handle(authed('/api/v1/timelines/home', token));
+      expect(fetched).toEqual([]);
+    });
+
     it('looks an account up by acct', async () => {
       const token = await login();
       const response = await handle(
@@ -1107,6 +1195,96 @@ describe('shim', () => {
       expect(social.calls.find((call) => call.method === 'account')?.args).toEqual([
         '@alice@social.example',
       ]);
+    });
+  });
+
+  describe('threads and favourites', () => {
+    const parentId = 'https://social.example/users/stu/statuses/1';
+    const postId = 'https://social.example/users/stu/statuses/2';
+
+    it('fetches a single status by its id', async () => {
+      const token = await login();
+      const response = await handle(authed(`/api/v1/statuses/${encodeId(postId)}`, token));
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { uri: string }).uri).toBe(postId);
+      expect(social.calls.find((call) => call.method === 'post')?.args).toEqual([postId]);
+    });
+
+    it('404s a status Ghost cannot find', async () => {
+      const token = await login();
+      social.failNext = new SocialWebError('GET v1/post failed: 404', 404);
+      const response = await handle(authed(`/api/v1/statuses/${encodeId(postId)}`, token));
+      expect(response.status).toBe(404);
+    });
+
+    it('maps the thread onto ancestors and descendants linked by in_reply_to_id', async () => {
+      const token = await login();
+      const reply = 'https://example.com/.ghost/activitypub/note/3';
+      const answer = 'https://social.example/users/stu/statuses/4';
+      social.threadResult = {
+        ancestors: { chain: [makePost({ id: parentId })], hasMore: false },
+        post: makePost({ id: postId }),
+        children: [
+          {
+            post: makePost({ id: reply }),
+            chain: [makePost({ id: answer })],
+            hasMore: false,
+          },
+        ],
+        next: null,
+      };
+
+      const response = await handle(
+        authed(`/api/v1/statuses/${encodeId(postId)}/context`, token),
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ancestors: Array<{ uri: string; in_reply_to_id: string | null }>;
+        descendants: Array<{ uri: string; in_reply_to_id: string | null }>;
+      };
+      expect(body.ancestors).toEqual([
+        expect.objectContaining({ uri: parentId, in_reply_to_id: null }),
+      ]);
+      expect(body.descendants).toEqual([
+        expect.objectContaining({ uri: reply, in_reply_to_id: encodeId(postId) }),
+        expect.objectContaining({ uri: answer, in_reply_to_id: encodeId(reply) }),
+      ]);
+    });
+
+    it('leaves deleted posts out of a thread', async () => {
+      const token = await login();
+      social.threadResult = {
+        ancestors: { chain: [makePost({ id: parentId, type: 2, content: '' })], hasMore: false },
+        post: makePost({ id: postId }),
+        children: [],
+        next: null,
+      };
+      const response = await handle(
+        authed(`/api/v1/statuses/${encodeId(postId)}/context`, token),
+      );
+      expect(await response.json()).toEqual({ ancestors: [], descendants: [] });
+    });
+
+    it('shows a post Ghost has no thread for on its own, not as deleted', async () => {
+      const token = await login();
+      social.threadResult = new SocialWebError('GET v1/replies failed: 404', 404);
+      const response = await handle(
+        authed(`/api/v1/statuses/${encodeId(postId)}/context`, token),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ancestors: [], descendants: [] });
+    });
+
+    it('lists the publication\'s liked posts as its favourites', async () => {
+      const token = await login();
+      const response = await handle(authed('/api/v1/favourites?limit=10', token));
+      expect(response.status).toBe(200);
+      const [status] = (await response.json()) as Array<{ favourited: boolean }>;
+      expect(status?.favourited).toBe(true);
+      expect(social.calls.find((call) => call.method === 'liked')?.args).toEqual([
+        { limit: 10 },
+      ]);
+      expect(response.headers.get('link')).toContain('max_id=liked-cursor-2');
     });
   });
 

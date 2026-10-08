@@ -8,6 +8,7 @@ import type {
   Page,
   Post,
   SocialWeb,
+  Thread,
 } from '../src/ghost/types.js';
 
 export async function tempDir(): Promise<{ path: string; cleanup: () => Promise<void> }> {
@@ -78,6 +79,10 @@ export class FakeSocialWeb implements SocialWeb {
   notes: Post[] = [];
   /** What posts() returns, when a test needs something other than one tidy post. */
   postsPage: Page<Post> | null = null;
+  /** What thread() returns. Null answers as Ghost does for a post it lacks. */
+  threadResult: Thread | Error | null = null;
+  /** Accounts account() returns by handle, in place of the default. */
+  accounts = new Map<string, Account>();
 
   private record(method: string, ...args: unknown[]): void {
     this.calls.push({ method, args });
@@ -95,7 +100,7 @@ export class FakeSocialWeb implements SocialWeb {
 
   async account(handle: string): Promise<Account> {
     this.record('account', handle);
-    return makeAccount({ handle });
+    return this.accounts.get(handle) ?? makeAccount({ handle });
   }
 
   async note(input: NoteInput): Promise<Post> {
@@ -155,6 +160,29 @@ export class FakeSocialWeb implements SocialWeb {
     this.record('posts', handle, options);
     if (this.postsPage) return this.postsPage;
     return { items: [makePost()], next: options.next ? null : 'posts-cursor-2' };
+  }
+
+  async liked(options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    this.record('liked', options);
+    return { items: [makePost({ likedByMe: true })], next: options.next ? null : 'liked-cursor-2' };
+  }
+
+  async post(apId: string): Promise<Post> {
+    this.record('post', apId);
+    return makePost({ id: apId });
+  }
+
+  async thread(apId: string): Promise<Thread> {
+    this.record('thread', apId);
+    if (this.threadResult instanceof Error) throw this.threadResult;
+    return (
+      this.threadResult ?? {
+        ancestors: { chain: [], hasMore: false },
+        post: makePost({ id: apId }),
+        children: [],
+        next: null,
+      }
+    );
   }
 
   async follows(

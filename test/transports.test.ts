@@ -140,6 +140,41 @@ describe('DirectSocialWeb', () => {
     expect(posts.next).toBe('2026-08-18T10:00:00.000Z');
     expect(follows.items).toHaveLength(1);
   });
+  it('reads liked posts from the publication\'s liked feed', async () => {
+    const { client, seen } = directClient(() =>
+      new Response(JSON.stringify({ posts: [makePost()], next: null })),
+    );
+    await client.liked({ limit: 10 });
+    expect(seen[0]?.url).toBe('https://example.com/.ghost/activitypub/v1/posts/me/liked?limit=10');
+  });
+
+  it('fetches a post Ghost has no thread for, then asks for the thread again', async () => {
+    const apId = 'https://social.example/users/stu/statuses/1';
+    let threadAsks = 0;
+    const thread = {
+      ancestors: { chain: [], hasMore: false },
+      post: makePost({ id: apId }),
+      children: [],
+      next: null,
+    };
+    const { client, seen } = directClient((record) => {
+      if (record.url.includes('/v1/replies/')) {
+        threadAsks += 1;
+        return threadAsks === 1
+          ? new Response(null, { status: 404 })
+          : new Response(JSON.stringify(thread));
+      }
+      return new Response(JSON.stringify(makePost({ id: apId })));
+    });
+
+    expect((await client.thread(apId)).post.id).toBe(apId);
+    const encoded = encodeURIComponent(apId);
+    expect(seen.map((record) => record.url)).toEqual([
+      `https://example.com/.ghost/activitypub/v1/replies/${encoded}`,
+      `https://example.com/.ghost/activitypub/v1/post/${encoded}`,
+      `https://example.com/.ghost/activitypub/v1/replies/${encoded}`,
+    ]);
+  });
 });
 
 function ghstClient(respond: (args: string[]) => { stdout: string; code?: number }): {

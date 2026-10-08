@@ -10,6 +10,7 @@ import type {
   Page,
   Post,
   SocialWeb,
+  Thread,
 } from './types.js';
 
 export class GhstError extends Error {
@@ -163,7 +164,7 @@ export class GhstSocialWeb implements SocialWeb {
     if (!apId) return synthesisePost(body, '', input.content);
 
     try {
-      return await this.run<Post>(['socialweb', 'post', apId]);
+      return await this.post(apId);
     } catch {
       return synthesisePost(body, apId, input.content);
     }
@@ -207,6 +208,19 @@ export class GhstSocialWeb implements SocialWeb {
 
   posts(handle: string, options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
     return this.feed('posts', options, [handle]);
+  }
+
+  liked(options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    return this.feed('likes', options);
+  }
+
+  post(apId: string): Promise<Post> {
+    return this.run<Post>(['socialweb', 'post', apId]);
+  }
+
+  /** ghst already retries through the post fetch when Ghost lacks the thread. */
+  thread(apId: string): Promise<Thread> {
+    return this.run<Thread>(['socialweb', 'thread', apId]);
   }
 
   async follows(

@@ -162,12 +162,14 @@ your bridge's domain as the server.
 | `GET /api/v1/accounts/:id/{followers,following}`, `/accounts/relationships` | Follow lists and follow state |
 | `POST /api/v1/accounts/:id/{follow,unfollow}` | Follow and unfollow |
 | `POST /api/v1/statuses` | A note, or a reply when `in_reply_to_id` is set, or a queue entry when `scheduled_at` is |
+| `GET /api/v1/statuses/:id`, `/statuses/:id/context` | One post, and the thread around it from Ghost's replies endpoint |
+| `GET /api/v1/favourites` | Posts the publication has liked |
 | `DELETE /api/v1/statuses/:id` | Delete |
 | `POST /api/v1/statuses/:id/{favourite,unfavourite,reblog,unreblog}` | Like and repost |
 | `POST /api/v1/media`, `/api/v2/media` | Image upload |
 | `GET /api/v1/timelines/home`, `/timelines/public` | The reader and notes feeds |
 | `GET /api/v1/notifications` | Notifications, with Mastodon's type names |
-| `GET /api/v1/{filters,lists,announcements,markers,preferences,custom_emojis}` | Empty shapes, so clients do not treat the instance as broken |
+| `GET /api/v1/{filters,lists,announcements,markers,preferences,custom_emojis,bookmarks}` | Empty shapes, so clients do not treat the instance as broken |
 
 ### Limits worth knowing before you rely on it
 
@@ -182,6 +184,12 @@ your bridge's domain as the server.
   publish unless `desk run` is also running.
 - **No streaming, no polls, no visibility other than public**, because Ghost has
   none of those.
+- **Join dates come from the account's own server.** Ghost does not record when
+  an account was created, so the bridge asks the account's server through the
+  public Mastodon lookup API. Servers without that API, and the publication
+  itself, show the Unix epoch instead.
+- **Who favourited or boosted a post is not available.** Ghost keeps the counts
+  but not the accounts, so those lists are always empty.
 
 ### Security posture
 

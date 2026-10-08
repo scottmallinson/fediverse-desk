@@ -90,6 +90,18 @@ export interface Page<T> {
   next: string | null;
 }
 
+/**
+ * A post with the conversation around it, as Ghost's replies endpoint returns
+ * it. Ancestors run from the root down to the direct parent. Each child is a
+ * direct reply, followed by the chain of replies hanging off it.
+ */
+export interface Thread {
+  ancestors: { chain: Post[]; hasMore: boolean };
+  post: Post;
+  children: Array<{ post: Post; chain: Post[]; hasMore: boolean }>;
+  next: string | null;
+}
+
 export interface ImageAttachment {
   url: string;
   altText?: string;
@@ -120,6 +132,12 @@ export interface SocialWeb {
   notesFeed(options?: { limit?: number; next?: string }): Promise<Page<Post>>;
   /** One account's own posts. "me" is the publication's handle. */
   posts(handle: string, options?: { limit?: number; next?: string }): Promise<Page<Post>>;
+  /** Posts the publication has liked, newest first. */
+  liked(options?: { limit?: number; next?: string }): Promise<Page<Post>>;
+  /** One post, by its ActivityPub id. */
+  post(apId: string): Promise<Post>;
+  /** One post with its ancestors and replies. */
+  thread(apId: string): Promise<Thread>;
   follows(
     handle: string,
     type: 'followers' | 'following',
