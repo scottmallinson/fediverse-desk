@@ -1,4 +1,6 @@
 import type { Queue } from '../scheduler/queue.js';
+import { SocialWebError } from '../ghost/direct.js';
+import type { Fetcher } from '../ghost/identity.js';
 import type { Account, SocialWeb } from '../ghost/types.js';
 import {
   LoginThrottle,
@@ -11,6 +13,7 @@ import {
   decodeId,
   encodeId,
   toAccount,
+  toContext,
   toRelationship,
   toInstance,
   toInstanceV2,
@@ -21,7 +24,10 @@ import {
   parseWebfingerResource,
   toNotification,
   toStatus,
+  type MastodonAccount,
+  type MastodonStatus,
 } from './mastodon.js';
+import { ProfileDirectory, within } from './profiles.js';
 import {
   Router,
   error,
@@ -42,9 +48,16 @@ export interface ShimDependencies {
   /** The Ghost site the bridge fronts. Reported in nodeinfo metadata. */
   ghostUrl: string;
   throttle?: LoginThrottle;
+  /** Asks other servers when an account joined. Tests pass one that never connects. */
+  fetcher?: Fetcher;
 }
 
 const AUTHENTICATED_PREFIX = '/api/v1/';
+
+// How long a response will wait on a profile lookup before going without it.
+// A lookup still running carries on and fills the cache for the next request.
+const PROFILE_BUDGET_MS = 3000;
+const AUTHOR_BUDGET_MS = 1500;
 
 /**
  * A Mastodon-compatible facade over one Ghost publication.
@@ -100,6 +113,58 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
 
   async function lookupAccount(handle: string): Promise<Account> {
     return handle === 'me' ? social.me() : social.account(handle);
+  }
+
+  async function isSelf(handle: string): Promise<boolean> {
+    const own = await selfIdentity();
+    return `@${handle.replace(/^@/, '').toLowerCase()}` === `@${own.handle.replace(/^@/, '')}`;
+  }
+
+  const profiles = new ProfileDirectory(
+    async (handle) =>
+      lookupAccount((await isSelf(handle)) ? 'me' : `@${handle.replace(/^@/, '')}`),
+    dependencies.fetcher,
+  );
+
+  /** Ghost's own site has no Mastodon API to ask, so the publication has no join date. */
+  async function joinedAt(handle: string): Promise<string | null> {
+    return (await isSelf(handle).catch(() => true)) ? null : profiles.joinedAt(handle);
+  }
+
+  /** A full account as Mastodon shows it, with its join date if it arrives in time. */
+  async function present(account: Account): Promise<MastodonAccount> {
+    profiles.remember(account);
+    const createdAt = await within(joinedAt(account.handle), PROFILE_BUDGET_MS, null);
+    return toAccount(account, { createdAt });
+  }
+
+  /**
+   * Swaps each status's bare author for the full account, so a profile opened
+   * from a post shows real counts and a join date. Authors that take too long
+   * keep the bare record this time round.
+   */
+  async function withAuthors(statuses: MastodonStatus[]): Promise<MastodonStatus[]> {
+    const accounts = await fullAccounts(statuses.map((status) => status.account.acct));
+    return statuses.map((status) => {
+      const account = accounts.get(status.account.acct);
+      return account ? { ...status, account } : status;
+    });
+  }
+
+  async function fullAccounts(handles: string[]): Promise<Map<string, MastodonAccount>> {
+    const unique = [...new Set(handles.filter(Boolean))];
+    const found = await Promise.all(
+      unique.map(async (handle) => {
+        const [account, createdAt] = await Promise.all([
+          within(profiles.account(handle), AUTHOR_BUDGET_MS, null),
+          within(joinedAt(handle), AUTHOR_BUDGET_MS, null),
+        ]);
+        return [handle, account ? toAccount(account, { createdAt }) : null] as const;
+      }),
+    );
+    return new Map(
+      found.filter((entry): entry is readonly [string, MastodonAccount] => entry[1] !== null),
+    );
   }
 
   // Mastodon clients page with max_id in one of two ways: by following the Link
@@ -343,7 +408,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   // --- accounts -------------------------------------------------------------
 
   router.get('/api/v1/accounts/verify_credentials', async () => {
-    const account = await currentAccount();
+    const account = await present(await social.me());
     return json({ ...account, source: { note: account.note, fields: account.fields } });
   });
 
@@ -378,13 +443,13 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
           ? `@${acct}`
           : null;
     if (!handle) return error('Record not found', 404);
-    return json(toAccount(await lookupAccount(handle)));
+    return json(await present(await lookupAccount(handle)));
   });
 
   router.get('/api/v1/accounts/:id', async ({ params }) => {
     const handle = await accountHandle(params.id as string);
     if (!handle) return error('Record not found', 404);
-    return json(toAccount(await lookupAccount(handle)));
+    return json(await present(await lookupAccount(handle)));
   });
 
   router.get('/api/v1/accounts/:id/statuses', async ({ params, url }) => {
@@ -424,7 +489,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       page.next,
     );
     return json(
-      statuses.map(({ status }) => status),
+      await withAuthors(statuses.map(({ status }) => status)),
       linkHeader(url, page.next),
     );
   });
@@ -441,7 +506,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
         limit: numberParam(url, 'limit', 40),
         ...cursor,
       });
-      const accounts = page.items.map(toAccount);
+      const accounts = await Promise.all(page.items.map(present));
       rememberPage(
         accounts.map((account) => account.id),
         page.next,
@@ -473,6 +538,36 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   router.get('/api/v1/featured_tags', () => json([]));
 
   // --- statuses -------------------------------------------------------------
+
+  router.get('/api/v1/statuses/:id', async ({ params }) => {
+    const apId = issuedStatusId(params.id as string);
+    if (!apId) return error('Record not found', 404);
+    const post = await notFoundAsNull(social.post(apId));
+    if (!post) return error('Record not found', 404);
+    const [status] = await withAuthors([toStatus(post)]);
+    return json(status);
+  });
+
+  // The thread under an opened post. A post Ghost cannot find a thread for is
+  // shown on its own rather than as an error: the client already has the post,
+  // and an error here reads as "this post was deleted".
+  router.get('/api/v1/statuses/:id/context', async ({ params }) => {
+    const apId = issuedStatusId(params.id as string);
+    if (!apId) return error('Record not found', 404);
+    const thread = await notFoundAsNull(social.thread(apId));
+    if (!thread) return json({ ancestors: [], descendants: [] });
+    const { ancestors, descendants } = toContext(thread);
+    const statuses = await withAuthors([...ancestors, ...descendants]);
+    return json({
+      ancestors: statuses.slice(0, ancestors.length),
+      descendants: statuses.slice(ancestors.length),
+    });
+  });
+
+  // Ghost does not say who liked or boosted another server's post, only how
+  // many did. An empty list keeps the client's counts screen from failing.
+  router.get('/api/v1/statuses/:id/favourited_by', () => json([]));
+  router.get('/api/v1/statuses/:id/reblogged_by', () => json([]));
 
   router.post('/api/v1/statuses', async ({ request }) => {
     const key = request.headers.get('idempotency-key');
@@ -579,17 +674,51 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       statuses.map((status) => status.id),
       page.next,
     );
-    return json(statuses, linkHeader(url, page.next));
+    return json(await withAuthors(statuses), linkHeader(url, page.next));
   });
 
   router.get('/api/v1/timelines/public', async ({ url }) => {
     const page = await social.notesFeed({ limit: numberParam(url, 'limit', 20) });
-    return json(page.items.map((post) => toStatus(post)), linkHeader(url, page.next));
+    return json(
+      await withAuthors(page.items.map((post) => toStatus(post))),
+      linkHeader(url, page.next),
+    );
   });
+
+  // The publication's liked posts. Mastodon calls a like a favourite.
+  router.get('/api/v1/favourites', async ({ url }) => {
+    const cursor = pageCursor(url);
+    if (cursor === 'end') return json([]);
+    const page = await social.liked({ limit: numberParam(url, 'limit', 20), ...cursor });
+    const statuses = page.items.flatMap((post) => {
+      try {
+        return [toStatus(post)];
+      } catch {
+        return [];
+      }
+    });
+    rememberPage(
+      statuses.map((status) => status.id),
+      page.next,
+    );
+    return json(await withAuthors(statuses), linkHeader(url, page.next));
+  });
+
+  router.get('/api/v1/bookmarks', () => json([]));
 
   router.get('/api/v1/notifications', async ({ url }) => {
     const page = await social.notifications({ limit: numberParam(url, 'limit', 20) });
-    return json(page.items.map(toNotification), linkHeader(url, page.next));
+    const notifications = page.items.map(toNotification);
+    const accounts = await fullAccounts(
+      notifications.map((notification) => (notification.account as MastodonAccount).acct),
+    );
+    return json(
+      notifications.map((notification) => {
+        const account = accounts.get((notification.account as MastodonAccount).acct);
+        return account ? { ...notification, account } : notification;
+      }),
+      linkHeader(url, page.next),
+    );
   });
 
   // Endpoints clients probe on connect. Answering with the empty shape keeps
@@ -661,6 +790,25 @@ function linkHeader(url: URL, next: string | null): ResponseInit {
   const target = new URL(url.toString());
   target.searchParams.set('max_id', next);
   return { headers: { Link: `<${target.toString()}>; rel="next"` } };
+}
+
+/** The ActivityPub id behind a status id, or null for one this bridge did not issue. */
+function issuedStatusId(id: string): string | null {
+  try {
+    return decodeId(id);
+  } catch {
+    return null;
+  }
+}
+
+/** Ghost's 404 as null, so a route can answer it as Mastodon would. */
+async function notFoundAsNull<T>(promise: Promise<T>): Promise<T | null> {
+  try {
+    return await promise;
+  } catch (thrown) {
+    if (thrown instanceof SocialWebError && thrown.status === 404) return null;
+    throw thrown;
+  }
 }
 
 /** A status or account id this bridge handed out, as opposed to a Ghost cursor. */

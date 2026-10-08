@@ -7,6 +7,7 @@ import type {
   Page,
   Post,
   SocialWeb,
+  Thread,
 } from './types.js';
 
 export class SocialWebError extends Error {
@@ -121,6 +122,22 @@ export class DirectSocialWeb implements SocialWeb {
     return this.request<Post>('GET', `v1/post/${encodeURIComponent(apId)}`);
   }
 
+  /**
+   * Ghost only answers for threads it has stored, and a post that reached the
+   * client some other way may not be one of them. Fetching the post makes Ghost
+   * pull it in, after which the thread is there to be read. ghst does the same.
+   */
+  async thread(apId: string): Promise<Thread> {
+    const path = `v1/replies/${encodeURIComponent(apId)}`;
+    try {
+      return await this.request<Thread>('GET', path);
+    } catch (thrown) {
+      if (!(thrown instanceof SocialWebError) || thrown.status !== 404) throw thrown;
+      await this.post(apId);
+      return this.request<Thread>('GET', path);
+    }
+  }
+
   deletePost(postId: string): Promise<void> {
     return this.request('DELETE', `v1/post/${encodeURIComponent(postId)}`, { expectEmpty: true });
   }
@@ -163,6 +180,10 @@ export class DirectSocialWeb implements SocialWeb {
 
   posts(handle: string, options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
     return this.feed(`v1/posts/${encodeHandle(handle)}`, options);
+  }
+
+  liked(options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    return this.feed('v1/posts/me/liked', options);
   }
 
   async follows(
