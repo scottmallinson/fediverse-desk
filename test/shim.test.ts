@@ -922,6 +922,45 @@ describe('shim', () => {
       expect(response.headers.get('link')).toContain('max_id=cursor-2');
     });
 
+    it('links on from the last page of a feed, to a page that is empty', async () => {
+      // The Android app takes max_id only from the Link header. Without one on
+      // the last page it asked for the newest page again, and the feed repeated.
+      const token = await login();
+      const last = await handle(authed('/api/v1/timelines/public', token));
+      const link = last.headers.get('link') ?? '';
+      expect(link).toContain('rel="next"');
+
+      const next = /<([^>]+)>/.exec(link)?.[1] as string;
+      const after = await handle(authed(new URL(next).pathname + new URL(next).search, token));
+      expect(await after.json()).toEqual([]);
+      expect(after.headers.get('link')).toBeNull();
+      expect(social.calls.filter((call) => call.method === 'notesFeed')).toHaveLength(1);
+    });
+
+    it('pages the public timeline and notifications from the cursor it was given', async () => {
+      const token = await login();
+      await handle(authed('/api/v1/timelines/public?max_id=2026-08-18T10:00:00.000Z', token));
+      await handle(authed('/api/v1/notifications?max_id=41', token));
+      expect(social.calls.find((call) => call.method === 'notesFeed')?.args[0]).toMatchObject({
+        next: '2026-08-18T10:00:00.000Z',
+      });
+      expect(social.calls.find((call) => call.method === 'notifications')?.args[0]).toMatchObject({
+        next: '41',
+      });
+    });
+
+    it('shows a post boosted by several accounts once per page', async () => {
+      const token = await login();
+      const boosted = makePost({ id: 'https://social.example/users/stu/statuses/9' });
+      social.readerPage = { items: [boosted, makePost(), boosted], next: null };
+      const response = await handle(authed('/api/v1/timelines/home', token));
+      const body = (await response.json()) as Array<{ uri: string }>;
+      expect(body.map((status) => status.uri)).toEqual([
+        'https://social.example/users/stu/statuses/9',
+        'https://example.com/.ghost/activitypub/note/1',
+      ]);
+    });
+
     it('maps a like notification onto a favourite', async () => {
       const token = await login();
       const response = await handle(authed('/api/v1/notifications', token));

@@ -79,6 +79,8 @@ export class FakeSocialWeb implements SocialWeb {
   notes: Post[] = [];
   /** What posts() returns, when a test needs something other than one tidy post. */
   postsPage: Page<Post> | null = null;
+  /** What readerFeed() returns, when a test needs something other than one post. */
+  readerPage: Page<Post> | null = null;
   /** What thread() returns. Null answers as Ghost does for a post it lacks. */
   threadResult: Thread | Error | null = null;
   /** Accounts account() returns by handle, in place of the default. */
@@ -146,13 +148,13 @@ export class FakeSocialWeb implements SocialWeb {
     this.record('unfollow', handle);
   }
 
-  async readerFeed(): Promise<Page<Post>> {
-    this.record('readerFeed');
-    return { items: [makePost()], next: 'cursor-2' };
+  async readerFeed(options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    this.record('readerFeed', options);
+    return this.readerPage ?? { items: [makePost()], next: 'cursor-2' };
   }
 
-  async notesFeed(): Promise<Page<Post>> {
-    this.record('notesFeed');
+  async notesFeed(options: { limit?: number; next?: string } = {}): Promise<Page<Post>> {
+    this.record('notesFeed', options);
     return { items: [makePost()], next: null };
   }
 
@@ -197,8 +199,8 @@ export class FakeSocialWeb implements SocialWeb {
     };
   }
 
-  async notifications(): Promise<Page<Notification>> {
-    this.record('notifications');
+  async notifications(options: { limit?: number; next?: string } = {}): Promise<Page<Notification>> {
+    this.record('notifications', options);
     return {
       items: [
         {

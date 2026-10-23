@@ -177,6 +177,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
   function pageCursor(url: URL): { next?: string } | 'end' {
     const maxId = url.searchParams.get('max_id');
     if (!maxId) return {};
+    if (maxId === END_OF_FEED) return 'end';
     const remembered = cursors.get(maxId);
     if (remembered) return { next: remembered };
     // One of our own ids that was not the end of a page we served. Passing it to
@@ -465,9 +466,13 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
 
     // Another server's posts come through Ghost close to raw, so one that cannot
     // be mapped is skipped rather than allowed to fail the whole profile.
+    const seen = new Set<string>();
     const mapped = page.items.flatMap((post) => {
       try {
-        return [{ post, status: toStatus(post) }];
+        const status = toStatus(post);
+        if (seen.has(status.id)) return [];
+        seen.add(status.id);
+        return [{ post, status }];
       } catch {
         return [];
       }
@@ -490,7 +495,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     );
     return json(
       await withAuthors(statuses.map(({ status }) => status)),
-      linkHeader(url, page.next),
+      linkHeader(url, page.next, mapped.length),
     );
   });
 
@@ -511,7 +516,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
         accounts.map((account) => account.id),
         page.next,
       );
-      return json(accounts, linkHeader(url, page.next));
+      return json(accounts, linkHeader(url, page.next, accounts.length));
     };
 
   router.get('/api/v1/accounts/:id/followers', followsHandler('followers'));
@@ -669,20 +674,24 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     const cursor = pageCursor(url);
     if (cursor === 'end') return json([]);
     const page = await social.readerFeed({ limit: numberParam(url, 'limit', 20), ...cursor });
-    const statuses = page.items.map((post) => toStatus(post));
+    const statuses = uniqueStatuses(page.items.map((post) => toStatus(post)));
     rememberPage(
       statuses.map((status) => status.id),
       page.next,
     );
-    return json(await withAuthors(statuses), linkHeader(url, page.next));
+    return json(await withAuthors(statuses), linkHeader(url, page.next, statuses.length));
   });
 
   router.get('/api/v1/timelines/public', async ({ url }) => {
-    const page = await social.notesFeed({ limit: numberParam(url, 'limit', 20) });
-    return json(
-      await withAuthors(page.items.map((post) => toStatus(post))),
-      linkHeader(url, page.next),
+    const cursor = pageCursor(url);
+    if (cursor === 'end') return json([]);
+    const page = await social.notesFeed({ limit: numberParam(url, 'limit', 20), ...cursor });
+    const statuses = uniqueStatuses(page.items.map((post) => toStatus(post)));
+    rememberPage(
+      statuses.map((status) => status.id),
+      page.next,
     );
+    return json(await withAuthors(statuses), linkHeader(url, page.next, statuses.length));
   });
 
   // The publication's liked posts. Mastodon calls a like a favourite.
@@ -690,25 +699,33 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     const cursor = pageCursor(url);
     if (cursor === 'end') return json([]);
     const page = await social.liked({ limit: numberParam(url, 'limit', 20), ...cursor });
-    const statuses = page.items.flatMap((post) => {
-      try {
-        return [toStatus(post)];
-      } catch {
-        return [];
-      }
-    });
+    const statuses = uniqueStatuses(
+      page.items.flatMap((post) => {
+        try {
+          return [toStatus(post)];
+        } catch {
+          return [];
+        }
+      }),
+    );
     rememberPage(
       statuses.map((status) => status.id),
       page.next,
     );
-    return json(await withAuthors(statuses), linkHeader(url, page.next));
+    return json(await withAuthors(statuses), linkHeader(url, page.next, statuses.length));
   });
 
   router.get('/api/v1/bookmarks', () => json([]));
 
   router.get('/api/v1/notifications', async ({ url }) => {
-    const page = await social.notifications({ limit: numberParam(url, 'limit', 20) });
+    const cursor = pageCursor(url);
+    if (cursor === 'end') return json([]);
+    const page = await social.notifications({ limit: numberParam(url, 'limit', 20), ...cursor });
     const notifications = page.items.map(toNotification);
+    rememberPage(
+      notifications.map((notification) => notification.id as string),
+      page.next,
+    );
     const accounts = await fullAccounts(
       notifications.map((notification) => (notification.account as MastodonAccount).acct),
     );
@@ -717,7 +734,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
         const account = accounts.get((notification.account as MastodonAccount).acct);
         return account ? { ...notification, account } : notification;
       }),
-      linkHeader(url, page.next),
+      linkHeader(url, page.next, notifications.length),
     );
   });
 
@@ -784,12 +801,37 @@ function numberParam(url: URL, key: string, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? Math.min(value, 40) : fallback;
 }
 
-/** Mastodon clients page by following the Link header rather than a body field. */
-function linkHeader(url: URL, next: string | null): ResponseInit {
-  if (!next) return {};
+/**
+ * Mastodon clients page by following the Link header rather than a body field,
+ * and Mastodon sends one with every page that has anything in it. The Android
+ * app takes the next page's max_id from it alone: with no header it has no
+ * max_id, so its next request is for the newest page, and the feed starts over
+ * underneath what the reader has already scrolled past. So the last page of a
+ * feed links on too, to a page that is always empty, which is how Mastodon
+ * itself says "that was everything".
+ */
+function linkHeader(url: URL, next: string | null, count: number): ResponseInit {
+  if (count === 0) return {};
   const target = new URL(url.toString());
-  target.searchParams.set('max_id', next);
+  target.searchParams.set('max_id', next ?? END_OF_FEED);
   return { headers: { Link: `<${target.toString()}>; rel="next"` } };
+}
+
+/** The max_id of the always-empty page after the last one. Never a Ghost cursor. */
+const END_OF_FEED = 'end';
+
+/**
+ * Ghost's feeds carry a row per repost, so a post boosted by two accounts the
+ * publication follows arrives twice with one id. Clients key their lists by id
+ * and show both, so only the first, newest, is kept.
+ */
+function uniqueStatuses(statuses: MastodonStatus[]): MastodonStatus[] {
+  const seen = new Set<string>();
+  return statuses.filter((status) => {
+    if (seen.has(status.id)) return false;
+    seen.add(status.id);
+    return true;
+  });
 }
 
 /** The ActivityPub id behind a status id, or null for one this bridge did not issue. */
