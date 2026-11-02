@@ -6,6 +6,8 @@ import { IdentityProvider } from './ghost/identity.js';
 import type { SocialWeb } from './ghost/types.js';
 import { Queue, parseWhen } from './scheduler/queue.js';
 import { Runner, watch } from './scheduler/runner.js';
+import { McpServer, serveStdio } from './mcp/protocol.js';
+import { buildTools, instructionsFor, parseWriteMode } from './mcp/tools.js';
 import { createApp } from './shim/app.js';
 import { OAuthServer } from './shim/oauth.js';
 import { serve } from './shim/server.js';
@@ -34,10 +36,17 @@ const USAGE = `desk - a personal desk for a Ghost publication's Fediverse handle
       --with-runner also drains the queue in the same process, which is what a
       single always-on container wants: one service, one long-running writer.
 
+  desk mcp [--write <off|queue|direct>]
+      Serve the handle to an AI client as a Model Context Protocol server over
+      stdio. Read-only unless --write or DESK_MCP_WRITE says otherwise: "queue"
+      lets the model draft notes and replies into the queue, "direct" also lets
+      it post, like, repost and follow immediately.
+
   desk status                  Show who the handle is and whether auth works.
 
 Global:
   --transport <ghst|direct>    Override DESK_TRANSPORT for this run.
+  --env-file <path>            Read settings from this file instead of ./.env.
   --help, --version
 `;
 
@@ -95,7 +104,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  await loadDotEnv();
+  await loadDotEnv(flagString(flags, 'env-file') ?? '.env');
   const config = loadConfig();
   const transportOverride = flagString(flags, 'transport');
   const command = positional[0];
@@ -111,6 +120,8 @@ async function main(argv: string[]): Promise<number> {
       return run(config, flags, transportOverride);
     case 'shim':
       return shim(config, flags);
+    case 'mcp':
+      return mcp(config, flags);
     default:
       process.stderr.write(`Unknown command "${command}".\n\n${USAGE}`);
       return 2;
@@ -371,6 +382,33 @@ async function shim(config: Config, flags: Argv['flags']): Promise<number> {
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
   });
+}
+
+/**
+ * stdout belongs to the protocol from here on. Anything meant for a person goes
+ * to stderr, which MCP clients show in their logs.
+ */
+async function mcp(config: Config, flags: Argv['flags']): Promise<number> {
+  const writeMode = parseWriteMode(flagString(flags, 'write') ?? process.env.DESK_MCP_WRITE);
+
+  // Direct, like the bridge: a long-running server should not spawn a CLI
+  // process for every tool call.
+  const identity = new IdentityProvider(config.ghostUrl, config.staffToken);
+  const social = new DirectSocialWeb(config.ghostUrl, identity);
+  const queue = Queue.open(config.dataDir);
+
+  const server = new McpServer({
+    name: 'fediverse-desk',
+    version: VERSION,
+    instructions: instructionsFor(writeMode),
+    tools: buildTools({ social, queue, writeMode }),
+  });
+
+  process.stderr.write(
+    `fediverse-desk MCP server on stdio. Writes: ${writeMode}. Queue: ${config.dataDir}\n`,
+  );
+  await serveStdio(server, process.stdin, process.stdout);
+  return 0;
 }
 
 main(process.argv.slice(2))
