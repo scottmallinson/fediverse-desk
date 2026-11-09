@@ -85,6 +85,10 @@ export class FakeSocialWeb implements SocialWeb {
   threadResult: Thread | Error | null = null;
   /** Accounts account() returns by handle, in place of the default. */
   accounts = new Map<string, Account>();
+  /** Handles account() refuses, as Ghost does for one it cannot resolve. */
+  unknownHandles = new Set<string>();
+  /** What search() returns, when a test needs something other than one account. */
+  searchResults: Account[] | null = null;
 
   private record(method: string, ...args: unknown[]): void {
     this.calls.push({ method, args });
@@ -102,6 +106,7 @@ export class FakeSocialWeb implements SocialWeb {
 
   async account(handle: string): Promise<Account> {
     this.record('account', handle);
+    if (this.unknownHandles.has(handle)) throw new Error(`No account for ${handle}`);
     return this.accounts.get(handle) ?? makeAccount({ handle });
   }
 
@@ -222,6 +227,6 @@ export class FakeSocialWeb implements SocialWeb {
 
   async search(query: string): Promise<{ accounts: Account[] }> {
     this.record('search', query);
-    return { accounts: [makeAccount()] };
+    return { accounts: this.searchResults ?? [makeAccount()] };
   }
 }

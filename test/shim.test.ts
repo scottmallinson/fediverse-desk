@@ -1327,6 +1327,226 @@ describe('shim', () => {
     });
   });
 
+  describe('search', () => {
+    it('resolves a handle Ghost has never seen, rather than only what it indexes', async () => {
+      const token = await login();
+      social.searchResults = [];
+
+      const response = await handle(
+        authed('/api/v2/search?q=%40stammy%40mastodon.social&type=accounts', token),
+      );
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as Record<string, any>;
+      expect(body.accounts).toHaveLength(1);
+      expect(body.accounts[0].acct).toBe('stammy@mastodon.social');
+      expect(social.calls).toContainEqual({ method: 'account', args: ['@stammy@mastodon.social'] });
+    });
+
+    it('reads a profile URL as the handle behind it', async () => {
+      const token = await login();
+      social.searchResults = [];
+
+      for (const query of [
+        'https://mastodon.social/@stammy',
+        'https://mastodon.social/users/stammy',
+      ]) {
+        const response = await handle(
+          authed(`/api/v2/search?q=${encodeURIComponent(query)}&type=accounts`, token),
+        );
+        const body = (await response.json()) as Record<string, any>;
+        expect(body.accounts[0]?.acct, query).toBe('stammy@mastodon.social');
+      }
+    });
+
+    it("falls back to Ghost's own search for a term that is not a handle", async () => {
+      const token = await login();
+      social.searchResults = [
+        makeAccount({ handle: '@someone@social.example', apId: 'https://social.example/users/someone' }),
+      ];
+
+      const response = await handle(authed('/api/v2/search?q=someone', token));
+      const body = (await response.json()) as Record<string, any>;
+
+      expect(social.calls).toContainEqual({ method: 'search', args: ['someone'] });
+      expect(body.accounts[0].acct).toBe('someone@social.example');
+    });
+
+    it('finds a post by its URL', async () => {
+      const token = await login();
+      const url = 'https://example.com/.ghost/activitypub/note/1';
+
+      const response = await handle(
+        authed(`/api/v2/search?q=${encodeURIComponent(url)}&type=statuses`, token),
+      );
+      const body = (await response.json()) as Record<string, any>;
+
+      expect(body.statuses).toHaveLength(1);
+      expect(body.statuses[0].uri).toBe(url);
+    });
+
+    it('answers the empty shape rather than 404ing, so a client can page', async () => {
+      const token = await login();
+
+      for (const query of ['/api/v2/search?q=', '/api/v1/search?q=anything&offset=20']) {
+        const response = await handle(authed(query, token));
+        expect(response.status, query).toBe(200);
+        expect(await response.json(), query).toEqual({
+          accounts: [],
+          statuses: [],
+          hashtags: [],
+        });
+      }
+    });
+
+    it('has no hashtags to offer, and says so', async () => {
+      const token = await login();
+      const response = await handle(authed('/api/v2/search?q=%23ghost&type=hashtags', token));
+      expect((await response.json() as Record<string, any>).hashtags).toEqual([]);
+    });
+
+    it('needs a token', async () => {
+      const response = await handle(new Request('https://desk.example/api/v2/search?q=x'));
+      expect(response.status).toBe(401);
+    });
+
+    it('gates the rest of /api/v2 too, which upload lives under', async () => {
+      const response = await handle(
+        new Request('https://desk.example/api/v2/media', { method: 'POST' }),
+      );
+      expect(response.status).toBe(401);
+    });
+  });
+
+  describe('explore', () => {
+    it('answers every tab empty instead of 404, which clients read as broken', async () => {
+      const token = await login();
+
+      for (const path of [
+        '/api/v1/trends',
+        '/api/v1/trends/statuses',
+        '/api/v1/trends/tags',
+        '/api/v1/trends/links',
+        '/api/v1/suggestions',
+        '/api/v2/suggestions',
+        '/api/v1/followed_tags',
+        '/api/v1/timelines/tag/ghost',
+      ]) {
+        const response = await handle(authed(path, token));
+        expect(response.status, path).toBe(200);
+        expect(await response.json(), path).toEqual([]);
+      }
+    });
+
+    it('describes a hashtag nobody here follows', async () => {
+      const token = await login();
+      const response = await handle(authed('/api/v1/tags/ghost', token));
+      expect(await response.json()).toMatchObject({
+        name: 'ghost',
+        following: false,
+        history: [],
+      });
+    });
+  });
+
+  describe('remote follow', () => {
+    it('advertises the subscribe template, which is how another server links here', async () => {
+      const response = await handle(
+        new Request('https://desk.example/.well-known/webfinger?resource=acct:scott@desk.example'),
+      );
+      const body = (await response.json()) as Record<string, any>;
+
+      expect(body.links).toContainEqual({
+        rel: 'http://ostatus.org/schema/1.0/subscribe',
+        template: 'https://desk.example/authorize_interaction?uri={uri}',
+      });
+    });
+
+    it('asks for the password before following, and needs no token to be reached', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/authorize_interaction?uri=' +
+            encodeURIComponent('https://mastodon.social/@stammy'),
+        ),
+      );
+
+      expect(response.status).toBe(200);
+      const page = await response.text();
+      expect(page).toContain('@stammy@mastodon.social');
+      expect(page).toContain('type="password"');
+      expect(social.calls.some((call) => call.method === 'follow')).toBe(false);
+    });
+
+    it('follows as the publication once the password is right', async () => {
+      const response = await handle(
+        new Request('https://desk.example/authorize_interaction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            uri: 'https://mastodon.social/@stammy',
+            password: PASSWORD,
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(200);
+      expect(social.calls).toContainEqual({
+        method: 'follow',
+        args: ['@stammy@mastodon.social'],
+      });
+      expect(await response.text()).toContain('now follows');
+    });
+
+    it('refuses a wrong password, and locks out after enough of them', async () => {
+      const attempt = () =>
+        handle(
+          new Request('https://desk.example/authorize_interaction', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              uri: 'https://mastodon.social/@stammy',
+              password: 'wrong',
+            }),
+          }),
+        );
+
+      expect((await attempt()).status).toBe(401);
+      expect((await attempt()).status).toBe(401);
+      expect((await attempt()).status).toBe(401);
+      expect((await attempt()).status).toBe(429);
+      expect(social.calls.some((call) => call.method === 'follow')).toBe(false);
+    });
+
+    it('will not let the publication follow itself', async () => {
+      const response = await handle(
+        new Request(
+          'https://desk.example/authorize_interaction?uri=' +
+            encodeURIComponent('https://example.com/@scott'),
+        ),
+      );
+      expect(response.status).toBe(422);
+    });
+
+    it('says so plainly when the account cannot be found', async () => {
+      social.unknownHandles.add('@ghost@nowhere.example');
+      social.searchResults = [];
+
+      const response = await handle(
+        new Request(
+          'https://desk.example/authorize_interaction?uri=' +
+            encodeURIComponent('https://nowhere.example/@ghost'),
+        ),
+      );
+      expect(response.status).toBe(404);
+      expect(await response.text()).toContain('Only accounts can be followed');
+    });
+
+    it('400s when the link named no account at all', async () => {
+      const response = await handle(new Request('https://desk.example/authorize_interaction'));
+      expect(response.status).toBe(400);
+    });
+  });
+
   it('answers an unknown route with 404 rather than a stack trace', async () => {
     const response = await handle(new Request('https://desk.example/api/v1/nope'));
     expect(response.status).toBe(404);

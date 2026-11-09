@@ -530,7 +530,11 @@ export function toNodeInfo(options: {
  * scottmallinson.com and its canonical handle, which is the correct outcome and
  * the reason this is safe to serve.
  */
-export function toWebfinger(account: Account, resource: string): Record<string, unknown> {
+export function toWebfinger(
+    account: Account,
+    resource: string,
+    options: { subscribeTemplate?: string } = {},
+): Record<string, unknown> {
     const links: Array<Record<string, string>> = [
         {
             rel: 'self',
@@ -549,6 +553,17 @@ export function toWebfinger(account: Account, resource: string): Record<string, 
 
     if (account.avatarUrl) {
         links.push({ rel: 'http://webfinger.net/rel/avatar', href: account.avatarUrl });
+    }
+
+    // How another server offers "follow this account from your own". Mastodon
+    // reads this template off the webfinger response and sends the visitor to
+    // it; without one it falls back to a guessed /authorize_interaction on the
+    // account's own host, which for a Ghost site is a 404.
+    if (options.subscribeTemplate) {
+        links.push({
+            rel: 'http://ostatus.org/schema/1.0/subscribe',
+            template: options.subscribeTemplate,
+        });
     }
 
     return {
