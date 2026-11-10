@@ -52,7 +52,11 @@ export interface ShimDependencies {
   fetcher?: Fetcher;
 }
 
-const AUTHENTICATED_PREFIX = '/api/v1/';
+// Everything under the client API needs a token, bar the handful of paths a
+// client has to read before it has one. Both versions are gated: /api/v2 is
+// where media upload and search live, and leaving it open would let anyone with
+// the URL post an image through the bridge.
+const AUTHENTICATED_PREFIXES = ['/api/v1/', '/api/v2/'];
 
 // How long a response will wait on a profile lookup before going without it.
 // A lookup still running carries on and fills the cache for the next request.
@@ -236,9 +240,12 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       return error('No such account', 404);
     }
 
-    return json(toWebfinger(account, `acct:${parsed.username}@${parsed.host}`), {
-      headers: { 'Content-Type': 'application/jrd+json; charset=utf-8' },
-    });
+    return json(
+      toWebfinger(account, `acct:${parsed.username}@${parsed.host}`, {
+        subscribeTemplate: `${publicUrl}/authorize_interaction?uri={uri}`,
+      }),
+      { headers: { 'Content-Type': 'application/jrd+json; charset=utf-8' } },
+    );
   });
 
   // Checked before login, and before /api/v1/instance. See toNodeInfo.
@@ -738,6 +745,197 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
     );
   });
 
+  // --- remote follow --------------------------------------------------------
+
+  /**
+   * "Follow from your own server". Another server sends a visitor here with the
+   * account they were looking at, this page asks for the bridge password, and
+   * the follow is made by the publication's Ghost actor.
+   *
+   * Servers find this page through the subscribe template in our webfinger
+   * response, so it is reached by the bridge's handle alone. A visitor who gives
+   * the publication's Ghost handle instead is sent to the Ghost site, which has
+   * no such page and answers 404. That is not something this bridge can fix: the
+   * Ghost domain's webfinger is Ghost's to serve.
+   */
+  async function interactionTarget(uri: string): Promise<Account | null> {
+    const handle = searchHandle(uri);
+    if (handle) {
+      const own = await isSelf(handle).catch(() => false);
+      const account = await (own ? social.me() : social.account(handle)).catch(() => null);
+      if (account) return account;
+    }
+    const result = await social.search(uri).catch(() => null);
+    return result?.accounts?.[0] ?? null;
+  }
+
+  router.get('/authorize_interaction', async ({ url }) => {
+    const uri = (url.searchParams.get('uri') ?? '').trim();
+    if (!uri) {
+      return html(
+        interactionPage({ message: 'The link that sent you here named no account.' }),
+        { status: 400 },
+      );
+    }
+
+    const account = await interactionTarget(uri);
+    if (!account) {
+      return html(
+        interactionPage({
+          uri,
+          message: `Nothing here could find ${uri}. Only accounts can be followed from this page.`,
+        }),
+        { status: 404 },
+      );
+    }
+    if (await isSelf(account.handle).catch(() => false)) {
+      return html(
+        interactionPage({ uri, message: 'That is this publication. It cannot follow itself.' }),
+        { status: 422 },
+      );
+    }
+
+    return html(interactionPage({ uri, account }));
+  });
+
+  router.post('/authorize_interaction', async ({ request }) => {
+    const params = await readParams(request);
+    const uri = (one(params, 'uri') ?? '').trim();
+    const password = one(params, 'password') ?? '';
+
+    const account = uri ? await interactionTarget(uri) : null;
+    if (!account) {
+      return html(
+        interactionPage({ uri, message: 'That account could not be found any more.' }),
+        { status: 404 },
+      );
+    }
+    if (await isSelf(account.handle).catch(() => false)) {
+      return html(
+        interactionPage({ uri, message: 'That is this publication. It cannot follow itself.' }),
+        { status: 422 },
+      );
+    }
+
+    // One throttle for the whole page, not one per account: the password is the
+    // same whichever profile a visitor arrived from.
+    if (throttle.isLocked(INTERACTION_THROTTLE_KEY)) {
+      return html(
+        interactionPage({
+          uri,
+          account,
+          message: 'Too many attempts. Wait fifteen minutes and try again.',
+        }),
+        { status: 429 },
+      );
+    }
+
+    if (!oauth.checkPassword(password)) {
+      throttle.recordFailure(INTERACTION_THROTTLE_KEY);
+      return html(
+        interactionPage({ uri, account, message: 'That password was not right.' }),
+        { status: 401 },
+      );
+    }
+
+    throttle.reset(INTERACTION_THROTTLE_KEY);
+    await social.follow(`@${account.handle.replace(/^@/, '')}`);
+    return html(interactionPage({ uri, account, followed: true }));
+  });
+
+  // --- search ---------------------------------------------------------------
+
+  /**
+   * Ghost's search looks up accounts and nothing else: there is no hashtag index
+   * behind this bridge and no full-text search over posts. A post is still
+   * findable by its URL, because that is a lookup rather than a search, and it
+   * is how a client opens a link somebody sent its reader.
+   */
+  async function searchAccounts(query: string, limit: number): Promise<MastodonAccount[]> {
+    const found: Account[] = [];
+    const seen = new Set<string>();
+    const keep = (account: Account) => {
+      const key = account.handle.replace(/^@/, '').toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      found.push(account);
+    };
+
+    // A handle or a profile URL is asked for directly, which reaches accounts
+    // Ghost has never seen; its own search only knows the ones it has.
+    const handle = searchHandle(query);
+    if (handle) {
+      const own = await isSelf(handle).catch(() => false);
+      const account = await (own ? social.me() : social.account(handle)).catch(() => null);
+      if (account) keep(account);
+    }
+
+    if (found.length < limit) {
+      const result = await social.search(query).catch(() => null);
+      for (const account of result?.accounts ?? []) keep(account);
+    }
+
+    return Promise.all(found.slice(0, limit).map(present));
+  }
+
+  async function searchStatuses(query: string, limit: number): Promise<MastodonStatus[]> {
+    if (limit < 1 || !/^https?:\/\//i.test(query)) return [];
+    const post = await notFoundAsNull(social.post(query)).catch(() => null);
+    if (!post) return [];
+    try {
+      return await withAuthors([toStatus(post)]);
+    } catch {
+      return [];
+    }
+  }
+
+  const searchHandler = async ({ url }: RouteContext) => {
+    const query = (url.searchParams.get('q') ?? '').trim();
+    const type = url.searchParams.get('type') ?? '';
+    const limit = numberParam(url, 'limit', 20);
+    const offset = Number(url.searchParams.get('offset') ?? '0');
+    const wanted = (kind: string) => type === '' || type === kind;
+
+    // Nothing here pages. A client asking for a second page of results is told
+    // there is nothing more, rather than handed the first page again.
+    const nothing = !query || (Number.isFinite(offset) && offset > 0);
+
+    const [accounts, statuses] = await Promise.all([
+      nothing || !wanted('accounts') ? [] : searchAccounts(query, limit),
+      nothing || !wanted('statuses') ? [] : searchStatuses(query, limit),
+    ]);
+
+    // Empty is a valid hashtag list in both versions of this endpoint, which
+    // differ only in whether they carry strings or objects.
+    return json({ accounts, statuses, hashtags: [] });
+  };
+
+  router.get('/api/v1/search', searchHandler);
+  router.get('/api/v2/search', searchHandler);
+
+  // --- explore --------------------------------------------------------------
+
+  // The Explore screen asks for all of these at once, one per tab. Ghost
+  // computes no trends and suggests no accounts, and a 404 reads to a client as
+  // a server that is broken rather than one that is quiet: the Mastodon Android
+  // app shows "it could've been deleted, or maybe it never existed at all" on
+  // every tab. An empty list is the honest answer and renders as "nothing here".
+  router.get('/api/v1/trends', () => json([]));
+  router.get('/api/v1/trends/tags', () => json([]));
+  router.get('/api/v1/trends/statuses', () => json([]));
+  router.get('/api/v1/trends/links', () => json([]));
+  router.get('/api/v1/suggestions', () => json([]));
+  router.get('/api/v2/suggestions', () => json([]));
+  router.get('/api/v1/followed_tags', () => json([]));
+
+  // Tapping a hashtag in a post opens these two. Ghost cannot answer either,
+  // but the screen they draw is empty rather than broken.
+  router.get('/api/v1/tags/:id', ({ params }) => {
+    const name = (params.id as string).replace(/^#/, '');
+    return json({ name, url: `${publicUrl}/tags/${encodeURIComponent(name)}`, history: [], following: false });
+  });
+  router.get('/api/v1/timelines/tag/:hashtag', () => json([]));
+
   // Endpoints clients probe on connect. Answering with the empty shape keeps
   // them from treating the instance as broken.
   router.get('/api/v1/filters', () => json([]));
@@ -756,7 +954,7 @@ export function createApp(dependencies: ShimDependencies): (request: Request) =>
       const match = router.match(request.method, url.pathname);
       if (!match) return error('Not found', 404);
 
-      if (url.pathname.startsWith(AUTHENTICATED_PREFIX) && !isPublic(url.pathname)) {
+      if (needsToken(url.pathname)) {
         const token = bearer(request);
         if (!token || !(await oauth.verifyToken(token))) {
           return error('The access token is invalid', 401);
@@ -785,8 +983,10 @@ const PUBLIC_PATHS = new Set([
   '/api/v1/custom_emojis',
 ]);
 
-function isPublic(pathname: string): boolean {
-  return PUBLIC_PATHS.has(pathname);
+
+function needsToken(pathname: string): boolean {
+  if (PUBLIC_PATHS.has(pathname)) return false;
+  return AUTHENTICATED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 function bearer(request: Request): string | null {
@@ -883,6 +1083,46 @@ class CursorMemory {
   }
 }
 
+const INTERACTION_THROTTLE_KEY = 'authorize_interaction';
+
+/**
+ * The "@user@host" handle a search term or an interaction URI stands for, or
+ * null when it is neither. Accepts the three forms that arrive in practice: a
+ * bare handle, an "acct:" one, and the profile URL another server links to.
+ */
+function searchHandle(value: string): string | null {
+  const trimmed = value.trim().replace(/^acct:/i, '');
+  const bare = trimmed.replace(/^@/, '');
+  if (/^[^@\s/]+@[^@\s/]+\.[^@\s/]+$/.test(bare)) return `@${bare}`;
+  return handleFromProfileUrl(trimmed);
+}
+
+/**
+ * "https://host/@user" and "https://host/users/user" are what the fediverse
+ * links a profile as. Anything else is left alone rather than guessed at: a
+ * wrong handle sends Ghost looking for an account that does not exist.
+ */
+function handleFromProfileUrl(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+
+  const segments = url.pathname.split('/').filter(Boolean);
+  const last = segments[segments.length - 1] ?? '';
+  const shaped =
+    (segments.length === 1 && last.startsWith('@')) ||
+    (segments.length === 2 && ['users', 'user', 'u'].includes(segments[0] as string));
+  if (!shaped) return null;
+
+  const user = decodeURIComponent(last).replace(/^@/, '');
+  if (!user || /[@\s/]/.test(user)) return null;
+  return `@${user}@${url.host}`;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -960,6 +1200,64 @@ function oobPage(code: string): string {
 <h1>Authorisation code</h1>
 <p>Paste this into the client that sent you here. It expires in five minutes.</p>
 <pre style="padding: 1rem; background: #f4f4f4; overflow-wrap: anywhere; white-space: pre-wrap;">${escapeHtml(code)}</pre>
+</body>
+</html>`;
+}
+
+function interactionPage(options: {
+  uri?: string;
+  account?: Account;
+  message?: string;
+  followed?: boolean;
+}): string {
+  const handle = options.account ? `@${options.account.handle.replace(/^@/, '')}` : '';
+  const name = options.account?.name || handle;
+  const title = options.followed ? 'Following' : 'Follow from your publication';
+
+  const profile = options.account
+    ? `<p class="who">
+    <strong>${escapeHtml(name)}</strong><br>
+    <span class="note">${escapeHtml(handle)}</span>
+  </p>`
+    : '';
+
+  const body = options.followed
+    ? `${profile}<p>Your publication now follows this account. Their posts will arrive in its feed.</p>
+  ${options.account?.url ? `<p><a href="${escapeHtml(options.account.url)}">View their profile</a></p>` : ''}`
+    : options.account
+      ? `${profile}
+  <p class="note">
+    The follow is made by your publication's Fediverse handle, not by this bridge.
+  </p>
+  <form method="post" action="/authorize_interaction">
+    <input type="hidden" name="uri" value="${escapeHtml(options.uri ?? '')}">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <button type="submit">Follow</button>
+  </form>`
+      : '';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>${escapeHtml(title)}</title>
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; }
+  label { display: block; margin: 1rem 0 0.25rem; }
+  input[type=password] { width: 100%; padding: 0.5rem; font-size: 1rem; }
+  button { margin-top: 1rem; padding: 0.5rem 1rem; font-size: 1rem; }
+  .note { color: #555; font-size: 0.9rem; }
+  .message { color: #a00; }
+  .who { margin: 1.5rem 0; }
+</style>
+</head>
+<body>
+<h1>${escapeHtml(title)}</h1>
+${options.message ? `<p class="message">${escapeHtml(options.message)}</p>` : ''}
+${body}
 </body>
 </html>`;
 }

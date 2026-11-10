@@ -169,10 +169,38 @@ your bridge's domain as the server.
 | `POST /api/v1/media`, `/api/v2/media` | Image upload |
 | `GET /api/v1/timelines/home`, `/timelines/public` | The reader and notes feeds |
 | `GET /api/v1/notifications` | Notifications, with Mastodon's type names |
+| `GET /api/v1/search`, `/api/v2/search` | Accounts by handle or profile URL, and posts by URL. Hashtags are always empty |
+| `GET`/`POST /authorize_interaction` | Remote follow: another server sends a visitor here to follow an account as the publication |
+| `GET /api/v1/{trends,trends/*,suggestions,followed_tags}`, `/api/v2/suggestions` | Empty. The Explore screen asks for all of these |
 | `GET /api/v1/{filters,lists,announcements,markers,preferences,custom_emojis,bookmarks}` | Empty shapes, so clients do not treat the instance as broken |
+
+### Following somebody from another server
+
+A Mastodon profile's **Follow** button, pressed by somebody who is not signed in
+there, asks for a handle and then sends the visitor back to their own server to
+confirm. Which server that is comes from the handle, and the two handles here
+are not interchangeable:
+
+| Handle given | What happens |
+|---|---|
+| `scott@scottmallinson.com` | Goes to the Ghost site, which has no such page. **404** |
+| `scott@desk.scottmallinson.com` | Goes to the bridge, which asks for the bridge password and makes the follow from the Ghost actor |
+
+So give the **bridge** handle when a site asks where to send you, and the
+publication's own handle everywhere else. Nothing here can change the first row:
+the Ghost domain's webfinger is served by Ghost, and Ghost does not offer a
+remote-follow page or advertise one.
+
+Inside a logged-in client, following works the ordinary way and neither of these
+pages is involved.
 
 ### Limits worth knowing before you rely on it
 
+- **No search over posts, and no hashtags.** Ghost indexes neither. Search finds
+  an account from a handle or a profile URL, and a post from its URL; everything
+  else comes back empty rather than as an error.
+- **Nothing trends and nothing is suggested.** Ghost computes neither, so the
+  Explore screen is empty by design rather than broken.
 - **One image per note.** Ghost's note API takes a single image. A status with
   two attachments is rejected with a 422 that says so, rather than silently
   dropping one.
@@ -201,7 +229,10 @@ posting rights on your publication. So:
 - Authorisation codes are single use and expire in five minutes.
 - Redirect URIs are compared exactly, never by prefix.
 - Password checks are constant time, and five failures lock a client out for
-  fifteen minutes.
+  fifteen minutes. The remote-follow page has one lockout of its own, shared
+  across every profile somebody might arrive from.
+- Everything under `/api/v1` and `/api/v2` needs a token, bar the few paths a
+  client has to read before it has one.
 - Request bodies are capped at 12MB.
 - Binds to `127.0.0.1` unless told otherwise, and says which it did.
 
@@ -243,6 +274,8 @@ site**, because that needs an Owner or Administrator staff access token. Until
 someone runs `desk status` with one, these remain unconfirmed:
 
 - the exact response shape of `actions/note` and `feed/reader` against real data
+- what `actions/search` returns for a term that is not a handle, which decides
+  how much of search is Ghost's and how much is the direct handle lookup
 - whether `upload/image` accepts the same MIME set as Ghost's own uploader
 - whether any rate limit applies on Ghost Pro, which proxies this service
 
