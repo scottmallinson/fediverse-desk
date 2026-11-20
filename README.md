@@ -294,6 +294,13 @@ the test suite caught it, because the fakes returned what the code expected
 rather than what Ghost sends. Assume there are more of those until a real token
 has been through the whole surface.
 
+## Contributing
+
+Bug reports, fixes, and above all a report from a real round trip against a
+Ghost site are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and what
+a pull request needs; [SECURITY.md](SECURITY.md) covers reporting a vulnerability
+privately. Taking part means following the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Licence
 
-MIT.
+[MIT](LICENSE).

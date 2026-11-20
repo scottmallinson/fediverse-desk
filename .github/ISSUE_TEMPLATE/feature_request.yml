@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest something the desk or the bridge should do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The scope is deliberately narrow: one Ghost publication, one handle, one
+        account on the bridge. Ghost's private API also limits what is possible,
+        so check the README's limits section first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it could work. Mention the client or Mastodon endpoint involved, if any.
+    validations:
+      required: true
+  - type: textarea
+    id: ghost-support
+    attributes:
+      label: Does Ghost support it?
+      description: If you know whether Ghost's ActivityPub API exposes what this needs, link the source.
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I would be willing to open a pull request for this
