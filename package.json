@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "description": "A personal desk for a Ghost publication's Fediverse handle: a scheduler and a Mastodon-compatible shim over Ghost's private ActivityPub API.",
+  "homepage": "https://github.com/scottmallinson/fediverse-desk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/scottmallinson/fediverse-desk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/scottmallinson/fediverse-desk/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"

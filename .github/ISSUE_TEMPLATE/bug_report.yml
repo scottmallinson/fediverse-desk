@@ -1,0 +1,69 @@
+name: Bug report
+description: Something does not work as the README says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Redact staff access tokens, bridge passwords,
+        `Authorization` headers and cookies** from anything you paste below.
+        Security problems go through the private advisory link instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. desk queue add "..." --at +5m
+        2. desk run --once
+        3. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: Which part
+      options:
+        - CLI / scheduler
+        - Mastodon bridge
+        - Container image or deployment
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - ghst
+        - direct
+        - Not sure
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit or image tag you are running.
+      placeholder: ghcr.io/scottmallinson/fediverse-desk:latest, or a commit SHA
+  - type: input
+    id: ghost
+    attributes:
+      label: Ghost version and hosting
+      placeholder: Ghost 6.x on Ghost(Pro), or self-hosted
+  - type: input
+    id: client
+    attributes:
+      label: Client, if the bridge was involved
+      placeholder: Buffer, Ivory, Elk, ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output or logs
+      description: Output of `desk status`, error messages, or the bridge's log. Redacted.
+      render: shell
