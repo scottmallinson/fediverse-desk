@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # Dev dependencies only: the app has no runtime dependencies.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        update-types: [minor, patch]
+    ignore:
+      # Types track the Node line the app runs on, which CI pins to 22.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
+
+  # Base images in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Moving to a new Node major is a deliberate change, made alongside CI
+      # and the engines field, not an automatic bump.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
