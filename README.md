@@ -129,6 +129,11 @@ desk shim --with-runner    # bridge, and drain the queue in the same process
 It refuses to start without `SHIM_PASSWORD`, binds to loopback by default, and
 says which of those two things it did on startup.
 
+Every request gets one line on stderr: time, method, path, status, duration,
+and the error if it ended in one. The query string, headers and bodies are not
+logged, because they carry tokens and passwords. In a container, read them with
+`docker compose logs desk`.
+
 `--with-runner` is what an always-on deployment wants: one service rather than
 two, and one long-running writer. The store locks and re-reads before every
 write, so running `desk queue add` from a shell against a live bridge is safe
